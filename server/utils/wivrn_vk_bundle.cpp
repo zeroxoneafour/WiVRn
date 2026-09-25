@@ -278,6 +278,8 @@ wivrn::vk_bundle::vk_bundle() :
 #ifdef VK_KHR_unified_image_layouts
 		        VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
 #endif
+// For the pyrowave encoder
+		        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
 // For perfetto GPU timestamp tracing
 #ifdef VK_EXT_calibrated_timestamps
 		        VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
@@ -321,11 +323,20 @@ wivrn::vk_bundle::vk_bundle() :
 #endif
 
 		// Enable features
-		auto [phys_feat, phys_feat12, phys_feat13] = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features>();
+		auto [phys_feat, phys_feat11, phys_feat12, phys_feat13] = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features>();
 
 		std::get<vk::PhysicalDeviceVulkan12Features>(feat).descriptorBindingPartiallyBound = phys_feat12.descriptorBindingPartiallyBound;
 		std::get<vk::PhysicalDeviceVulkan12Features>(feat).timelineSemaphore = phys_feat12.timelineSemaphore;
 		std::get<vk::PhysicalDeviceVulkan13Features>(feat).synchronization2 = phys_feat13.synchronization2;
+
+		// Optional, for the pyrowave encoder
+		std::get<vk::PhysicalDeviceFeatures2>(feat).features.shaderInt16 = phys_feat.features.shaderInt16;
+		std::get<vk::PhysicalDeviceFeatures2>(feat).features.shaderStorageImageWriteWithoutFormat = phys_feat.features.shaderStorageImageWriteWithoutFormat;
+		std::get<vk::PhysicalDeviceVulkan11Features>(feat).storageBuffer16BitAccess = phys_feat11.storageBuffer16BitAccess;
+		std::get<vk::PhysicalDeviceVulkan12Features>(feat).storageBuffer8BitAccess = phys_feat12.storageBuffer8BitAccess;
+		std::get<vk::PhysicalDeviceVulkan12Features>(feat).shaderFloat16 = phys_feat12.shaderFloat16;
+		std::get<vk::PhysicalDeviceVulkan13Features>(feat).subgroupSizeControl = phys_feat13.subgroupSizeControl;
+		std::get<vk::PhysicalDeviceVulkan13Features>(feat).computeFullSubgroups = phys_feat13.computeFullSubgroups;
 
 		if (not phys_feat13.synchronization2)
 			throw std::runtime_error("GPU does not support Vulkan synchronization2 feature");

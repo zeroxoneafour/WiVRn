@@ -23,6 +23,7 @@
 #else
 #include "decoder/ffmpeg/ffmpeg_decoder.h"
 #endif
+#include "decoder/pyrowave_decoder.h"
 #include "decoder/raw_decoder.h"
 
 wivrn::decoder::~decoder() = default;
@@ -67,6 +68,15 @@ std::shared_ptr<wivrn::decoder> wivrn::decoder::make(
 			        stream_index,
 			        scene,
 			        acc);
+		case pyrowave:
+			return std::make_shared<wivrn::pyrowave_decoder>(
+			        device,
+			        phys_dev,
+			        vk_queue_family_index,
+			        description,
+			        stream_index,
+			        scene,
+			        acc);
 	}
 	__builtin_unreachable();
 }
@@ -80,6 +90,8 @@ static std::vector<wivrn::video_codec> supported_codecs_()
 	wivrn::ffmpeg::decoder::supported_codecs(res);
 #endif
 	res.push_back(wivrn::video_codec::raw);
+	if (wivrn::pyrowave_decoder::supported())
+		res.push_back(wivrn::video_codec::pyrowave);
 	return res;
 }
 

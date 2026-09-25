@@ -31,17 +31,19 @@ Identifier of the encoder, one of
 * `nvenc`: Nvidia hardware encoding
 * `vaapi`: AMD/Intel hardware encoding
 * `vulkan`: for any GPU that supports vulkan video encode
+* `pyrowave`: [PyroWave](https://github.com/Themaister/pyrowave) wavelet codec in Vulkan compute shaders, for any GPU. It is never selected by default: it has very low latency but needs a high bitrate (200+ Mbit/s), so it is only suited to fast local networks
 
 ### `codec`
 Default value: best supported by both headset and encoder of `av1`, `h264`, `h265`.
 
-One of `h264`, `h265`, `av1`, `raw`.
+One of `h264`, `h265`, `av1`, `raw`, `pyrowave`.
 
 Not all encoders support every codec:
 - `x264` encoder only supports `h264` codec
 - `vulkan` encoder supports `h264` and `h265` codecs
 - `raw` encoder only supports `raw` codec
-- `nvenc` and `vaapi` support all codecs, except `raw`
+- `pyrowave` encoder only supports `pyrowave` codec
+- `nvenc` and `vaapi` support all codecs, except `raw` and `pyrowave`
 
 If `nvenc` encoder is in use, you can refer to [nvidia website](https://developer.nvidia.com/video-encode-decode-support-matrix) to make sure that your GPU supports encoding with the desired codec.
 

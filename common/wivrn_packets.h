@@ -199,6 +199,7 @@ enum video_codec
 	hevc = h265,
 	av1,
 	raw,
+	pyrowave,
 };
 
 enum class stream_tab : uint8_t

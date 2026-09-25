@@ -267,11 +267,24 @@ if (WIVRN_BUILD_SERVER)
 
 	include(CompileGLSL)
 	FetchContent_GetProperties(monado SOURCE_DIR _monado_src)
+
+	FetchContent_MakeAvailable(pyrowave)
+	FetchContent_GetProperties(pyrowave SOURCE_DIR _pyrowave_src)
+	set(_pyrowave_shaders)
+	wivrn_glsl_variant(_pyrowave_shaders pyrowave_dwt "${_pyrowave_src}/shaders/dwt.comp" DEFINES PRECISION=1 FP16=0)
+	wivrn_glsl_variant(_pyrowave_shaders pyrowave_dwt_fp16 "${_pyrowave_src}/shaders/dwt.comp" DEFINES PRECISION=1 FP16=1)
+	wivrn_glsl_variant(_pyrowave_shaders pyrowave_wavelet_quant "${_pyrowave_src}/shaders/wavelet_quant.comp")
+	wivrn_glsl_variant(_pyrowave_shaders pyrowave_analyze_rate_control "${_pyrowave_src}/shaders/analyze_rate_control.comp")
+	wivrn_glsl_variant(_pyrowave_shaders pyrowave_analyze_rate_control_finalize "${_pyrowave_src}/shaders/analyze_rate_control_finalize.comp")
+	wivrn_glsl_variant(_pyrowave_shaders pyrowave_resolve_rate_control "${_pyrowave_src}/shaders/resolve_rate_control.comp")
+	wivrn_glsl_variant(_pyrowave_shaders pyrowave_block_packing "${_pyrowave_src}/shaders/block_packing.comp")
+
 	wivrn_compile_glsl(wivrn-server
 		TARGET_ENV vulkan1.3
 		SHADERS
 			"${_monado_src}/src/xrt/auxiliary/render/shaders/layer.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/foveation.comp"
+			${_pyrowave_shaders}
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)

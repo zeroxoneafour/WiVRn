@@ -136,7 +136,17 @@ file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
 
 file(GLOB_RECURSE VULKAN_SHADERS CONFIGURE_DEPENDS "*.glsl")
 target_sources(wivrn PRIVATE ${LOCAL_SOURCE} ${VULKAN_SHADERS})
-wivrn_compile_glsl(wivrn SHADERS ${VULKAN_SHADERS})
+
+FetchContent_MakeAvailable(pyrowave)
+FetchContent_GetProperties(pyrowave SOURCE_DIR _pyrowave_src)
+set(PYROWAVE_SHADERS)
+# Subgroup operations need SPIR-V 1.3
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt "${_pyrowave_src}/shaders/idwt.comp" TARGET_ENV vulkan1.1 DEFINES PRECISION=1 FP16=0)
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt_fp16 "${_pyrowave_src}/shaders/idwt.comp" TARGET_ENV vulkan1.1 DEFINES PRECISION=1 FP16=1)
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_wavelet_dequant "${_pyrowave_src}/shaders/wavelet_dequant.comp" TARGET_ENV vulkan1.1 DEFINES STORAGE_MODE=0)
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_wavelet_dequant_texel "${_pyrowave_src}/shaders/wavelet_dequant.comp" TARGET_ENV vulkan1.1 DEFINES STORAGE_MODE=1)
+
+wivrn_compile_glsl(wivrn SHADERS ${VULKAN_SHADERS} ${PYROWAVE_SHADERS})
 
 target_link_libraries(wivrn
     Boost::locale

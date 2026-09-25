@@ -335,6 +335,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 			{
 				case h264:
 				case raw:
+				case pyrowave:
 					break;
 				case h265:
 				case av1:

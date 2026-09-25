@@ -94,14 +94,18 @@ extern const std::map<std::string, std::vector<uint32_t>> shaders = {
 ")
 
     foreach(in_file IN LISTS _args_SHADERS)
+        get_source_file_property(target_env ${in_file} WIVRN_GLSL_TARGET_ENV)
+        if (NOT target_env)
+            set(target_env ${_args_TARGET_ENV})
+        endif()
         if (in_file MATCHES "\.\(vert|frag|tesc|tese|geom|comp\)\(\.glsl\)?$")
             set(shader_stage ${CMAKE_MATCH_1})
             cmake_path(GET in_file STEM LAST_ONLY shader_name)
-            compile_glsl_aux(${shader_stage} ${shader_name} ${in_file} ${OUTPUT} ${_args_TARGET_ENV})
+            compile_glsl_aux(${shader_stage} ${shader_name} ${in_file} ${OUTPUT} ${target_env})
         else()
             cmake_path(GET in_file STEM LAST_ONLY shader_name)
-            compile_glsl_aux(vert ${shader_name}.vert ${in_file} ${OUTPUT} ${_args_TARGET_ENV})
-            compile_glsl_aux(frag ${shader_name}.frag ${in_file} ${OUTPUT} ${_args_TARGET_ENV})
+            compile_glsl_aux(vert ${shader_name}.vert ${in_file} ${OUTPUT} ${target_env})
+            compile_glsl_aux(frag ${shader_name}.frag ${in_file} ${OUTPUT} ${target_env})
         endif()
 
 
@@ -112,4 +116,43 @@ extern const std::map<std::string, std::vector<uint32_t>> shaders = {
     target_sources(${target} PRIVATE ${OUTPUT})
     target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
+endfunction()
+
+# Generate a copy of a third party GLSL source, named <name>, with preprocessor
+# definitions and #include support enabled, and append it to <out_list> to be
+# passed to wivrn_compile_glsl.
+# wivrn_glsl_variant(<out_list> <name> <source> [TARGET_ENV <env>] [DEFINES <NAME=VALUE>...])
+function(wivrn_glsl_variant out_list name source)
+    cmake_parse_arguments(_args "" "TARGET_ENV" "DEFINES" ${ARGN})
+
+    cmake_path(GET source EXTENSION LAST_ONLY ext)
+    cmake_path(GET source PARENT_PATH source_dir)
+    set(output "${CMAKE_CURRENT_BINARY_DIR}/glsl_variants/${name}${ext}")
+    # glslang only resolves includes relative to the including file
+    cmake_path(RELATIVE_PATH source_dir BASE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/glsl_variants")
+
+    set(preamble "#extension GL_GOOGLE_include_directive : require\n")
+    foreach(define IN LISTS _args_DEFINES)
+        string(REPLACE "=" " " define "${define}")
+        string(APPEND preamble "#define ${define}\n")
+    endforeach()
+
+    file(READ "${source}" content)
+    string(REGEX REPLACE "#include \"([^\"]+)\"" "#include \"${source_dir}/\\1\"" content "${content}")
+    string(REGEX REPLACE "(#version[^\n]*\n)" "\\1${preamble}#line 2\n" content "${content}")
+
+    set(old_content "")
+    if (EXISTS "${output}")
+        file(READ "${output}" old_content)
+    endif()
+    if (NOT old_content STREQUAL content)
+        file(WRITE "${output}" "${content}")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}")
+
+    if (_args_TARGET_ENV)
+        set_source_files_properties("${output}" PROPERTIES WIVRN_GLSL_TARGET_ENV ${_args_TARGET_ENV})
+    endif()
+
+    set(${out_list} ${${out_list}} "${output}" PARENT_SCOPE)
 endfunction()

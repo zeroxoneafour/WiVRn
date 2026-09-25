@@ -23,6 +23,7 @@
 #include "util/u_logging.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "video_encoder.h"
+#include "video_encoder_pyrowave.h"
 #include "wivrn_packets.h"
 
 #include <magic_enum.hpp>
@@ -207,6 +208,7 @@ class prober
 			case av1:
 				U_LOG_D("Vulkan video encode for AV1 is not implemented in WiVRn");
 			case raw:
+			case pyrowave:
 				return false;
 		}
 		U_LOG_E("Invalid codec %d", int(codec));
@@ -222,6 +224,15 @@ public:
 	{
 		if (config.codec == video_codec::raw or config.name == encoder_raw)
 			return {encoder_raw, video_codec::raw};
+
+		if (config.codec == video_codec::pyrowave or config.name == encoder_pyrowave)
+		{
+			if (not std::ranges::contains(info.supported_codecs, video_codec::pyrowave))
+				throw std::runtime_error("Headset does not support the pyrowave codec");
+			if (not video_encoder_pyrowave::supported(vk))
+				throw std::runtime_error("GPU does not support the pyrowave encoder");
+			return {encoder_pyrowave, video_codec::pyrowave};
+		}
 
 #if WIVRN_USE_VULKAN_ENCODE
 		if (config.name.empty() or config.name == encoder_vulkan)
