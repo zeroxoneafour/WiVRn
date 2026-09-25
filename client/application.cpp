@@ -842,6 +842,7 @@ void application::initialize_vulkan()
 	optional_device_extensions.emplace(VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+	optional_device_extensions.emplace(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
 
 #ifdef __ANDROID__
 	vk_device_extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);

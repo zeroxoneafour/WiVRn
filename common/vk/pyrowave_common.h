@@ -170,6 +170,7 @@ struct device_caps
 
 	uint32_t vendor_id = 0;
 	uint32_t max_texel_buffer_elements = 0;
+	vk::DriverId driver_id{}; // 0 if unknown
 
 	// api_version is the version the device was created with, features promoted to
 	// core in that version do not need the extension.
@@ -215,6 +216,14 @@ struct descriptor
 	{
 		return {.type = vk::DescriptorType::eUniformTexelBuffer, .texel_buffer = view};
 	}
+	static descriptor sampled_image(vk::ImageView view, vk::ImageLayout layout)
+	{
+		return {.type = vk::DescriptorType::eSampledImage, .image = {.imageView = view, .imageLayout = layout}};
+	}
+	static descriptor sampler(vk::Sampler sampler)
+	{
+		return {.type = vk::DescriptorType::eSampler, .image = {.sampler = sampler}};
+	}
 };
 
 // A compute pipeline using push descriptors on set 0
@@ -247,6 +256,9 @@ struct compute_pipeline
 
 	void push_descriptors(vk::raii::CommandBuffer & cmd, std::initializer_list<descriptor> descriptors) const;
 };
+
+// Push descriptors to set 0 of the layout
+void push_descriptors(vk::raii::CommandBuffer & cmd, vk::PipelineBindPoint bind_point, vk::PipelineLayout layout, std::initializer_list<descriptor> descriptors);
 
 void memory_barrier(vk::raii::CommandBuffer & cmd, vk::PipelineStageFlags src_stage, vk::AccessFlags src_access, vk::PipelineStageFlags dst_stage, vk::AccessFlags dst_access);
 

@@ -145,6 +145,11 @@ wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt "${_pyrowave_src}/shaders/idwt
 wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt_fp16 "${_pyrowave_src}/shaders/idwt.comp" TARGET_ENV vulkan1.1 DEFINES PRECISION=1 FP16=1)
 wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_wavelet_dequant "${_pyrowave_src}/shaders/wavelet_dequant.comp" TARGET_ENV vulkan1.1 DEFINES STORAGE_MODE=0)
 wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_wavelet_dequant_texel "${_pyrowave_src}/shaders/wavelet_dequant.comp" TARGET_ENV vulkan1.1 DEFINES STORAGE_MODE=1)
+# Fragment shader iDWT, for mobile GPUs
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt_vs "${_pyrowave_src}/shaders/idwt.vert" TARGET_ENV vulkan1.1)
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt_fs0 "${_pyrowave_src}/shaders/idwt.frag" TARGET_ENV vulkan1.1 DEFINES CHROMA_CONFIG=0)
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt_fs1 "${_pyrowave_src}/shaders/idwt.frag" TARGET_ENV vulkan1.1 DEFINES CHROMA_CONFIG=1)
+wivrn_glsl_variant(PYROWAVE_SHADERS pyrowave_idwt_fs2 "${_pyrowave_src}/shaders/idwt.frag" TARGET_ENV vulkan1.1 DEFINES CHROMA_CONFIG=2)
 
 wivrn_compile_glsl(wivrn SHADERS ${VULKAN_SHADERS} ${PYROWAVE_SHADERS})
 

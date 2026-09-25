@@ -64,6 +64,12 @@ device_caps device_caps::query(vk::raii::PhysicalDevice & physical_device, uint3
 		caps.shader_float16 = feat.get<vk::PhysicalDeviceShaderFloat16Int8Features>().shaderFloat16;
 	}
 
+	if (has_vk12 or has_ext(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME))
+	{
+		auto props = physical_device.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties>();
+		caps.driver_id = props.get<vk::PhysicalDeviceDriverProperties>().driverID;
+	}
+
 	if (api_version >= VK_API_VERSION_1_3 or has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME))
 	{
 		auto feat = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceSubgroupSizeControlFeatures>();
@@ -192,6 +198,11 @@ compute_pipeline::compute_pipeline(
 
 void compute_pipeline::push_descriptors(vk::raii::CommandBuffer & cmd, std::initializer_list<descriptor> descriptors) const
 {
+	pyrowave_core::push_descriptors(cmd, vk::PipelineBindPoint::eCompute, *layout, descriptors);
+}
+
+void push_descriptors(vk::raii::CommandBuffer & cmd, vk::PipelineBindPoint bind_point, vk::PipelineLayout layout, std::initializer_list<descriptor> descriptors)
+{
 	std::array<vk::WriteDescriptorSet, 8> writes;
 	assert(descriptors.size() <= writes.size());
 	uint32_t i = 0;
@@ -207,7 +218,7 @@ void compute_pipeline::push_descriptors(vk::raii::CommandBuffer & cmd, std::init
 		};
 		++i;
 	}
-	cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *layout, 0, vk::ArrayProxy<const vk::WriteDescriptorSet>(i, writes.data()));
+	cmd.pushDescriptorSetKHR(bind_point, layout, 0, vk::ArrayProxy<const vk::WriteDescriptorSet>(i, writes.data()));
 }
 
 void memory_barrier(vk::raii::CommandBuffer & cmd, vk::PipelineStageFlags src_stage, vk::AccessFlags src_access, vk::PipelineStageFlags dst_stage, vk::AccessFlags dst_access)
