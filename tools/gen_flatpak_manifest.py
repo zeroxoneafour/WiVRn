@@ -60,6 +60,8 @@ if __name__ == "__main__":
         monado_commit = f.read()
     boost_url = cmake.get("boost", "URL")
     boost_sha256 = cmake.get("boost", "URL_HASH").split("=")[-1]
+    pyrowave_url = cmake.get("pyrowave", "URL")
+    pyrowave_sha256 = cmake.get("pyrowave", "URL_HASH").split("=")[-1]
 
     try:
         git_tag = (
@@ -102,6 +104,8 @@ if __name__ == "__main__":
 
     template = template.replace("BOOST_URL", boost_url)
     template = template.replace("BOOST_SHA256", boost_sha256)
+    template = template.replace("PYROWAVE_URL", pyrowave_url)
+    template = template.replace("PYROWAVE_SHA256", pyrowave_sha256)
     template = template.replace("MONADO_COMMIT", monado_commit)
 
     with open(os.path.join(args.out, "io.github.wivrn.wivrn.yml"), "w") as f:

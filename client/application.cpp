@@ -837,6 +837,11 @@ void application::initialize_vulkan()
 	optional_device_extensions.emplace(VK_IMG_FILTER_CUBIC_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);
+	// For the pyrowave decoder
+	optional_device_extensions.emplace(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+	optional_device_extensions.emplace(VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
+	optional_device_extensions.emplace(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
+	optional_device_extensions.emplace(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
 
 #ifdef __ANDROID__
 	vk_device_extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
@@ -966,6 +971,7 @@ void application::initialize_vulkan()
 	};
 
 	vk::PhysicalDeviceFeatures device_features{
+	        .shaderStorageImageWriteWithoutFormat = vk_physical_device.getFeatures().shaderStorageImageWriteWithoutFormat,
 	        .shaderClipDistance = true,
 	};
 
@@ -984,7 +990,11 @@ void application::initialize_vulkan()
 	        vk::PhysicalDeviceMultiviewFeaturesKHR{
 	                .multiview = true,
 	        },
-	        vk::PhysicalDeviceIndexTypeUint8FeaturesEXT{}};
+	        vk::PhysicalDeviceIndexTypeUint8FeaturesEXT{},
+	        vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT{},
+	        vk::PhysicalDevice8BitStorageFeaturesKHR{},
+	        vk::PhysicalDevice16BitStorageFeaturesKHR{},
+	        vk::PhysicalDeviceShaderFloat16Int8FeaturesKHR{}};
 
 	auto check_feature_flag = [&](auto feature_flag, const char * extension_name) -> bool {
 		using FeatureStruct = class_from_member_t<decltype(feature_flag)>;
@@ -1004,6 +1014,12 @@ void application::initialize_vulkan()
 
 	check_feature_flag(&vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::timelineSemaphore, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	check_feature_flag(&vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::indexTypeUint8, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
+	check_feature_flag(&vk::PhysicalDevice8BitStorageFeaturesKHR::storageBuffer8BitAccess, VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
+	check_feature_flag(&vk::PhysicalDevice16BitStorageFeaturesKHR::storageBuffer16BitAccess, VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
+	check_feature_flag(&vk::PhysicalDeviceShaderFloat16Int8FeaturesKHR::shaderFloat16, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+	if (check_feature_flag(&vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT::subgroupSizeControl, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME))
+		device_create_info.get<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>().computeFullSubgroups =
+		        vk_physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>().get<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>().computeFullSubgroups;
 
 	vk_device = xr_system_id.create_device(vk_physical_device, device_create_info.get());
 	*vk_queue.lock() = vk_device.getQueue(vk_queue_family_index, 0);

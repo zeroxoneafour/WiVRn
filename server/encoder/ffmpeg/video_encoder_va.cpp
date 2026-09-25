@@ -69,6 +69,7 @@ const char * encoder(video_codec codec)
 		case video_codec::av1:
 			return "av1_vaapi";
 		case video_codec::raw:
+		case video_codec::pyrowave:
 			break;
 	}
 	throw std::runtime_error("invalid codec " + std::to_string(int(codec)));
@@ -261,6 +262,8 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 			break;
 		case video_codec::raw:
 			throw std::runtime_error("raw codec not supported");
+		case video_codec::pyrowave:
+			throw std::runtime_error("pyrowave codec not supported");
 	}
 	for (auto option: settings.options)
 	{

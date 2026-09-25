@@ -57,6 +57,7 @@ static AVCodecID codec_id(wivrn::video_codec codec)
 		case c::av1:
 			return AV_CODEC_ID_AV1;
 		case c::raw:
+		case c::pyrowave:
 			break;
 	}
 	assert(false);

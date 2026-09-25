@@ -144,6 +144,10 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 	}
 #endif
 
+	// pyrowave samples the planes
+	if (std::ranges::contains(encoders, wivrn::encoder_pyrowave, &wivrn::encoder_settings::encoder_name))
+		image_info.get().usage |= vk::ImageUsageFlagBits::eSampled;
+
 	auto make_image = [&](int i) {
 		vk::ImageViewUsageCreateInfo usage{
 		        .usage = vk::ImageUsageFlagBits::eStorage,
