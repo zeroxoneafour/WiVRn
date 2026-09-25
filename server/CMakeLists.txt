@@ -114,6 +114,7 @@ if (WIVRN_BUILD_SERVER)
 			encoder/encoder_settings.cpp
 			encoder/idr_handler.cpp
 			encoder/video_encoder.cpp
+			encoder/video_encoder_pyrowave.cpp
 			encoder/video_encoder_raw.cpp
 
 			driver/app_pacer.cpp
