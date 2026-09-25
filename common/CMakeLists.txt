@@ -22,6 +22,7 @@ add_library(wivrn-common STATIC EXCLUDE_FROM_ALL
     utils/strings.cpp
     vk/allocation.cpp
     vk/error_category.cpp
+    vk/pyrowave_common.cpp
     vk/vk_allocator.cpp
     vk/vk_mem_alloc.cpp
 )
