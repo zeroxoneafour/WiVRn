@@ -56,15 +56,27 @@ class decoder : public wavelet_buffers
 	uint32_t last_seq = UINT32_MAX;
 	bool decoded_frame_for_current_sequence = false;
 
+	// iDWT in render passes, optimized for mobile GPUs which have weak compute support
+	struct fragment_path;
+	std::unique_ptr<fragment_path> fragment;
+
 public:
 	static void check_support(const device_caps & caps);
-	decoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma);
+	// Upstream recommendation: not for desktop GPUs
+	static bool prefers_fragment_path(const device_caps & caps);
+
+	decoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma, bool fragment_path);
+	~decoder();
 	void clear();
 	bool push_packet(std::span<const uint8_t> data);
 
 	bool decode_is_ready(bool allow_partial_frame, int pristine_bands = 2, float received_ratio = 0.9f) const;
 
-	// Output planes must be in general layout and writable as storage images.
+	// Usage the output plane views need
+	vk::ImageUsageFlags output_usage() const;
+
+	// Output planes must be in general layout and writable with output_usage().
+	// With the fragment path, the command buffer must support graphics operations.
 	// The previous decode must have completed.
 	void decode(vk::raii::CommandBuffer & cmd, const view_buffers & views);
 
@@ -76,6 +88,7 @@ private:
 	void upload_payload();
 	void dequant(vk::raii::CommandBuffer & cmd);
 	void idwt(vk::raii::CommandBuffer & cmd, const view_buffers & views);
+	void idwt_fragment(vk::raii::CommandBuffer & cmd, const view_buffers & views);
 };
 } // namespace pyrowave_core
 
@@ -87,7 +100,7 @@ class pyrowave_decoder : public decoder
 	struct image
 	{
 		image_allocation image;
-		std::vector<vk::raii::ImageView> planes; // storage views
+		std::vector<vk::raii::ImageView> planes; // views written by the decoder
 		vk::raii::ImageView view = nullptr;      // sampled view
 		vk::ImageLayout current_layout = vk::ImageLayout::eUndefined;
 		std::atomic_bool free = true;
@@ -117,6 +130,8 @@ class pyrowave_decoder : public decoder
 	std::vector<uint8_t> bitstream;
 
 	static pyrowave_core::device_caps caps(vk::raii::PhysicalDevice & physical_device);
+	// Can be overridden with WIVRN_PYROWAVE_FRAGMENT=0/1
+	static bool use_fragment_path(const pyrowave_core::device_caps & caps);
 	image * get_free();
 
 public:

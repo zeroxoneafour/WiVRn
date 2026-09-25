@@ -29,6 +29,8 @@
 #include "vk/specialization_constants.h"
 #include "wivrn_shaders.h"
 
+#include <format>
+#include <map>
 #include <ranges>
 #include <spdlog/spdlog.h>
 
@@ -101,7 +103,374 @@ std::optional<device_caps::subgroup_config> dequant_subgroup(const device_caps &
 		return config;
 	return caps.subgroup_for(2, 7, 128);
 }
+
+struct fragment_push_data
+{
+	float uv_offset[2];
+	float half_texel_offset[2];
+	float res_scale;
+	int32_t aligned_transform_size;
+};
+
+// Intermediate precision of the iDWT, same as the FP16 storage of the wavelet bands
+constexpr vk::Format fragment_format = vk::Format::eR16Sfloat;
+constexpr vk::Format fragment_format_cbcr = vk::Format::eR16G16Sfloat;
+constexpr vk::Format output_plane_format = vk::Format::eR8Unorm;
+
+struct attachment
+{
+	vk::ImageView view;
+	vk::Format format;
+	vk::ImageLayout layout;
+	vk::Extent2D extent;
+};
 } // namespace
+
+// Direct port of the fragment path of PyroWave's decoder
+struct decoder::fragment_path
+{
+	vk::raii::Device & device;
+	vk::raii::ShaderModule vs = nullptr;
+	std::array<vk::raii::ShaderModule, 3> fs{nullptr, nullptr, nullptr}; // CHROMA_CONFIG 0, 1, 2
+	vk::raii::DescriptorSetLayout set_layout = nullptr;
+	vk::raii::PipelineLayout layout = nullptr;
+
+	struct level_t
+	{
+		// Output of the vertical passes: [even/odd pass][Y, CbCr]
+		image_allocation vert[2][2];
+		vk::raii::ImageView vert_views[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
+		// Output of the horizontal pass: LL band of the previous level
+		image_allocation horiz[num_components];
+		vk::raii::ImageView horiz_views[num_components]{nullptr, nullptr, nullptr};
+
+		// Input bands, the LL band is the output of the previous horizontal pass
+		vk::raii::ImageView band_views[num_components][num_frequency_bands_per_level]{
+		        {nullptr, nullptr, nullptr, nullptr},
+		        {nullptr, nullptr, nullptr, nullptr},
+		        {nullptr, nullptr, nullptr, nullptr},
+		};
+		vk::ImageView decoded[num_components][num_frequency_bands_per_level];
+		vk::ImageLayout decoded_layout[num_components][num_frequency_bands_per_level];
+	};
+	std::array<level_t, decomposition_levels> levels;
+
+	std::map<std::vector<std::pair<vk::Format, vk::ImageLayout>>, vk::raii::RenderPass> render_passes;
+	std::map<std::pair<VkRenderPass, std::vector<VkImageView>>, std::pair<vk::raii::Framebuffer, vk::Extent2D>> framebuffers;
+	std::map<std::tuple<VkRenderPass, int, bool, bool, bool, int>, vk::raii::Pipeline> pipelines;
+
+	vk::raii::ShaderModule make_module(const shader_map & shaders, const char * name)
+	{
+		const auto & spirv = shaders.at(name);
+		return vk::raii::ShaderModule(
+		        device,
+		        vk::ShaderModuleCreateInfo{
+		                .codeSize = spirv.size() * sizeof(uint32_t),
+		                .pCode = spirv.data(),
+		        });
+	}
+
+	fragment_path(vk::raii::Device & device, const shader_map & shaders, const wavelet_buffers & buffers) :
+	        device(device)
+	{
+		vs = make_module(shaders, "pyrowave_idwt_vs");
+		fs[0] = make_module(shaders, "pyrowave_idwt_fs0");
+		fs[1] = make_module(shaders, "pyrowave_idwt_fs1");
+		fs[2] = make_module(shaders, "pyrowave_idwt_fs2");
+
+		// Superset of the bindings of all chroma configurations
+		std::array<vk::DescriptorSetLayoutBinding, 7> bindings;
+		for (uint32_t i = 0; i < bindings.size(); ++i)
+			bindings[i] = {
+			        .binding = i,
+			        .descriptorType = i == 2 ? vk::DescriptorType::eSampler : vk::DescriptorType::eSampledImage,
+			        .descriptorCount = 1,
+			        .stageFlags = vk::ShaderStageFlagBits::eFragment,
+			};
+		set_layout = vk::raii::DescriptorSetLayout(
+		        device,
+		        vk::DescriptorSetLayoutCreateInfo{
+		                .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+		                .bindingCount = uint32_t(bindings.size()),
+		                .pBindings = bindings.data(),
+		        });
+		vk::PushConstantRange push_range{
+		        .stageFlags = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
+		        .size = sizeof(fragment_push_data),
+		};
+		layout = vk::raii::PipelineLayout(
+		        device,
+		        vk::PipelineLayoutCreateInfo{
+		                .setLayoutCount = 1,
+		                .pSetLayouts = &*set_layout,
+		                .pushConstantRangeCount = 1,
+		                .pPushConstantRanges = &push_range,
+		        });
+
+		for (int level = 0; level < decomposition_levels; level++)
+		{
+			auto & l = levels[level];
+			vk::Extent2D horiz_extent{buffers.level_width(level), buffers.level_height(level)};
+			vk::Extent2D vert_extent{horiz_extent.width, horiz_extent.height * 2};
+
+			auto make_image = [&](vk::Extent2D extent, vk::Format format, const std::string & name) {
+				return image_allocation(
+				        device,
+				        vk::ImageCreateInfo{
+				                .imageType = vk::ImageType::e2D,
+				                .format = format,
+				                .extent = {extent.width, extent.height, 1},
+				                .mipLevels = 1,
+				                .arrayLayers = 1,
+				                .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled,
+				        },
+				        {.usage = VMA_MEMORY_USAGE_AUTO},
+				        name);
+			};
+			auto make_view = [&](vk::Image image, vk::Format format) {
+				return vk::raii::ImageView(
+				        device,
+				        vk::ImageViewCreateInfo{
+				                .image = image,
+				                .viewType = vk::ImageViewType::e2D,
+				                .format = format,
+				                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1},
+				        });
+			};
+
+			for (int comp = 0; comp < num_components; comp++)
+			{
+				l.horiz[comp] = make_image(horiz_extent, fragment_format, std::format("pyrowave horizontal output (level {}, comp {})", level, comp));
+				l.horiz_views[comp] = make_view(l.horiz[comp], fragment_format);
+			}
+			for (int pass = 0; pass < 2; pass++)
+			{
+				for (int comp = 0; comp < 2; comp++)
+				{
+					auto format = comp == 0 ? fragment_format : fragment_format_cbcr;
+					l.vert[pass][comp] = make_image(vert_extent, format, std::format("pyrowave vertical {} input (level {}, comp {})", pass ? "odd" : "even", level, comp));
+					l.vert_views[pass][comp] = make_view(l.vert[pass][comp], format);
+				}
+			}
+
+			for (int comp = 0; comp < num_components; comp++)
+			{
+				for (int band = 0; band < num_frequency_bands_per_level; band++)
+				{
+					if (band == 0 and level < decomposition_levels - 1)
+					{
+						l.decoded[comp][band] = *l.horiz_views[comp];
+						l.decoded_layout[comp][band] = vk::ImageLayout::eShaderReadOnlyOptimal;
+						continue;
+					}
+
+					bool high_res = level < wavelet_fp16_levels;
+					l.band_views[comp][band] = vk::raii::ImageView(
+					        device,
+					        vk::ImageViewCreateInfo{
+					                .image = high_res ? vk::Image(buffers.wavelet_img_high_res) : vk::Image(buffers.wavelet_img_low_res),
+					                .viewType = vk::ImageViewType::e2D,
+					                .format = high_res ? vk::Format::eR16Sfloat : vk::Format::eR32Sfloat,
+					                .subresourceRange = {
+					                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+					                        .baseMipLevel = uint32_t(high_res ? level : level - wavelet_fp16_levels),
+					                        .levelCount = 1,
+					                        .baseArrayLayer = uint32_t(4 * comp + band),
+					                        .layerCount = 1,
+					                },
+					        });
+					l.decoded[comp][band] = *l.band_views[comp][band];
+					l.decoded_layout[comp][band] = vk::ImageLayout::eGeneral;
+				}
+			}
+		}
+	}
+
+	vk::RenderPass render_pass(std::span<const attachment> attachments)
+	{
+		std::vector<std::pair<vk::Format, vk::ImageLayout>> key;
+		for (const auto & a: attachments)
+			key.emplace_back(a.format, a.layout);
+
+		auto it = render_passes.find(key);
+		if (it != render_passes.end())
+			return *it->second;
+
+		std::vector<vk::AttachmentDescription> descriptions;
+		std::vector<vk::AttachmentReference> references;
+		for (const auto & a: attachments)
+		{
+			// Everything in the render area is written
+			references.push_back({.attachment = uint32_t(descriptions.size()), .layout = a.layout});
+			descriptions.push_back({
+			        .format = a.format,
+			        .samples = vk::SampleCountFlagBits::e1,
+			        .loadOp = vk::AttachmentLoadOp::eDontCare,
+			        .storeOp = vk::AttachmentStoreOp::eStore,
+			        .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+			        .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+			        .initialLayout = a.layout,
+			        .finalLayout = a.layout,
+			});
+		}
+		vk::SubpassDescription subpass{
+		        .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
+		        .colorAttachmentCount = uint32_t(references.size()),
+		        .pColorAttachments = references.data(),
+		};
+		vk::raii::RenderPass rp(
+		        device,
+		        vk::RenderPassCreateInfo{
+		                .attachmentCount = uint32_t(descriptions.size()),
+		                .pAttachments = descriptions.data(),
+		                .subpassCount = 1,
+		                .pSubpasses = &subpass,
+		        });
+		return *render_passes.emplace(std::move(key), std::move(rp)).first->second;
+	}
+
+	// Begins a render pass on the attachments, returns the framebuffer size
+	std::pair<vk::RenderPass, vk::Extent2D> begin(vk::raii::CommandBuffer & cmd, std::span<const attachment> attachments, std::optional<vk::Rect2D> render_area = std::nullopt)
+	{
+		auto rp = render_pass(attachments);
+
+		std::pair<VkRenderPass, std::vector<VkImageView>> key{rp, {}};
+		vk::Extent2D extent{UINT32_MAX, UINT32_MAX};
+		for (const auto & a: attachments)
+		{
+			key.second.push_back(a.view);
+			extent.width = std::min(extent.width, a.extent.width);
+			extent.height = std::min(extent.height, a.extent.height);
+		}
+
+		auto it = framebuffers.find(key);
+		if (it == framebuffers.end())
+		{
+			std::vector<vk::ImageView> views(attachments.size());
+			std::ranges::transform(attachments, views.begin(), &attachment::view);
+			vk::raii::Framebuffer fb(
+			        device,
+			        vk::FramebufferCreateInfo{
+			                .renderPass = rp,
+			                .attachmentCount = uint32_t(views.size()),
+			                .pAttachments = views.data(),
+			                .width = extent.width,
+			                .height = extent.height,
+			                .layers = 1,
+			        });
+			it = framebuffers.emplace(std::move(key), std::make_pair(std::move(fb), extent)).first;
+		}
+
+		cmd.beginRenderPass(
+		        vk::RenderPassBeginInfo{
+		                .renderPass = rp,
+		                .framebuffer = *it->second.first,
+		                .renderArea = render_area.value_or(vk::Rect2D{.extent = extent}),
+		        },
+		        vk::SubpassContents::eInline);
+		return {rp, extent};
+	}
+
+	vk::Pipeline pipeline(vk::RenderPass rp, uint32_t color_count, int config, bool vertical, bool final_y, bool final_cbcr, int edge)
+	{
+		auto key = std::make_tuple(VkRenderPass(rp), config, vertical, final_y, final_cbcr, edge);
+		auto it = pipelines.find(key);
+		if (it != pipelines.end())
+			return *it->second;
+
+		auto spec = make_specialization_constants(VkBool32(vertical), VkBool32(final_y), VkBool32(final_cbcr), int32_t(edge));
+		std::array stages{
+		        vk::PipelineShaderStageCreateInfo{
+		                .stage = vk::ShaderStageFlagBits::eVertex,
+		                .module = *vs,
+		                .pName = "main",
+		                .pSpecializationInfo = spec,
+		        },
+		        vk::PipelineShaderStageCreateInfo{
+		                .stage = vk::ShaderStageFlagBits::eFragment,
+		                .module = *fs[config],
+		                .pName = "main",
+		                .pSpecializationInfo = spec,
+		        },
+		};
+		vk::PipelineVertexInputStateCreateInfo vertex_input{};
+		vk::PipelineInputAssemblyStateCreateInfo input_assembly{.topology = vk::PrimitiveTopology::eTriangleList};
+		vk::PipelineViewportStateCreateInfo viewport{.viewportCount = 1, .scissorCount = 1};
+		vk::PipelineRasterizationStateCreateInfo rasterization{
+		        .polygonMode = vk::PolygonMode::eFill,
+		        .cullMode = vk::CullModeFlagBits::eNone,
+		        .lineWidth = 1,
+		};
+		vk::PipelineMultisampleStateCreateInfo multisample{.rasterizationSamples = vk::SampleCountFlagBits::e1};
+		std::vector<vk::PipelineColorBlendAttachmentState> blend(
+		        color_count,
+		        {.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA});
+		vk::PipelineColorBlendStateCreateInfo color_blend{
+		        .attachmentCount = color_count,
+		        .pAttachments = blend.data(),
+		};
+		std::array dynamic_states{vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+		vk::PipelineDynamicStateCreateInfo dynamic{
+		        .dynamicStateCount = uint32_t(dynamic_states.size()),
+		        .pDynamicStates = dynamic_states.data(),
+		};
+
+		vk::raii::Pipeline p(
+		        device,
+		        nullptr,
+		        vk::GraphicsPipelineCreateInfo{
+		                .stageCount = uint32_t(stages.size()),
+		                .pStages = stages.data(),
+		                .pVertexInputState = &vertex_input,
+		                .pInputAssemblyState = &input_assembly,
+		                .pViewportState = &viewport,
+		                .pRasterizationState = &rasterization,
+		                .pMultisampleState = &multisample,
+		                .pColorBlendState = &color_blend,
+		                .pDynamicState = &dynamic,
+		                .layout = *layout,
+		                .renderPass = rp,
+		        });
+		return *pipelines.emplace(key, std::move(p)).first->second;
+	}
+
+	// Draws a full screen triangle in the scissor, skipped if empty
+	void draw(vk::raii::CommandBuffer & cmd, vk::Pipeline pipeline, int32_t x, int32_t y, int32_t width, int32_t height)
+	{
+		if (width <= 0 or height <= 0)
+			return;
+		cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+		cmd.setScissor(0, vk::Rect2D{.offset = {x, y}, .extent = {uint32_t(width), uint32_t(height)}});
+		cmd.draw(3, 1, 0, 0);
+	}
+};
+
+bool decoder::prefers_fragment_path(const device_caps & caps)
+{
+	if (caps.driver_id == vk::DriverId{})
+	{
+		// Unknown driver, assume the proprietary one
+		constexpr uint32_t vendor_qualcomm = 0x5143;
+		constexpr uint32_t vendor_arm = 0x13b5;
+		return caps.vendor_id == vendor_qualcomm or caps.vendor_id == vendor_arm;
+	}
+
+	switch (caps.driver_id)
+	{
+		// QCOM hardware struggles with compute in general and prefers fragment.
+		// Turnip seems to like compute path just fine though ...
+		case vk::DriverId::eQualcommProprietary:
+			return true;
+
+		// Mali heavily favors texture sampling over LS heavy content.
+		case vk::DriverId::eArmProprietary:
+		case vk::DriverId::eMesaPanvk:
+			return true;
+
+		default:
+			return false;
+	}
+}
 
 void decoder::check_support(const device_caps & caps)
 {
@@ -117,7 +486,7 @@ void decoder::check_support(const device_caps & caps)
 		throw std::runtime_error("pyrowave: 8 and 16 bit storage or large texel buffers are required");
 }
 
-decoder::decoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma) :
+decoder::decoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma, bool fragment_path) :
         wavelet_buffers(device, width, height, chroma),
         use_readonly_texel_buffer(prefer_texel_buffer(caps))
 {
@@ -141,17 +510,22 @@ decoder::decoder(vk::raii::Device & device, const device_caps & caps, const shad
 		        sizeof(dequantizer_push_data),
 		        *dequant_subgroup(caps));
 
-	for (int dc_shift = 0; dc_shift < 2; ++dc_shift)
+	if (fragment_path)
+		fragment = std::make_unique<decoder::fragment_path>(device, shaders, *this);
+	else
 	{
-		auto spec = make_specialization_constants(VkBool32(dc_shift));
-		idwt_pipeline[dc_shift] = compute_pipeline(
-		        device,
-		        shaders,
-		        caps.shader_float16 ? "pyrowave_idwt_fp16" : "pyrowave_idwt",
-		        {type::eCombinedImageSampler, type::eStorageImage},
-		        sizeof(idwt_push_data),
-		        {},
-		        spec);
+		for (int dc_shift = 0; dc_shift < 2; ++dc_shift)
+		{
+			auto spec = make_specialization_constants(VkBool32(dc_shift));
+			idwt_pipeline[dc_shift] = compute_pipeline(
+			        device,
+			        shaders,
+			        caps.shader_float16 ? "pyrowave_idwt_fp16" : "pyrowave_idwt",
+			        {type::eCombinedImageSampler, type::eStorageImage},
+			        sizeof(idwt_push_data),
+			        {},
+			        spec);
+		}
 	}
 
 	dequant_offset_buffer = buffer_allocation(
@@ -169,6 +543,13 @@ decoder::decoder(vk::raii::Device & device, const device_caps & caps, const shad
 	payload_data_cpu.reserve(1024 * 1024);
 
 	clear();
+}
+
+decoder::~decoder() = default;
+
+vk::ImageUsageFlags decoder::output_usage() const
+{
+	return fragment ? vk::ImageUsageFlagBits::eColorAttachment : vk::ImageUsageFlagBits::eStorage;
 }
 
 void decoder::clear()
@@ -304,14 +685,17 @@ void decoder::decode(vk::raii::CommandBuffer & cmd, const view_buffers & views)
 
 	// Previous frame may still be reading the wavelet images
 	memory_barrier(cmd,
-	               vk::PipelineStageFlagBits::eComputeShader,
+	               vk::PipelineStageFlagBits::eComputeShader | (fragment ? vk::PipelineStageFlagBits::eFragmentShader : vk::PipelineStageFlags{}),
 	               vk::AccessFlagBits::eShaderWrite,
 	               vk::PipelineStageFlagBits::eComputeShader,
 	               vk::AccessFlagBits::eShaderWrite);
 	transition_wavelet_images(cmd);
 
 	dequant(cmd);
-	idwt(cmd, views);
+	if (fragment)
+		idwt_fragment(cmd, views);
+	else
+		idwt(cmd, views);
 
 	decoded_frame_for_current_sequence = true;
 }
@@ -464,7 +848,7 @@ void decoder::dequant(vk::raii::CommandBuffer & cmd)
 	memory_barrier(cmd,
 	               vk::PipelineStageFlagBits::eComputeShader,
 	               vk::AccessFlagBits::eShaderWrite,
-	               vk::PipelineStageFlagBits::eComputeShader,
+	               fragment ? vk::PipelineStageFlagBits::eFragmentShader : vk::PipelineStageFlagBits::eComputeShader,
 	               vk::AccessFlagBits::eShaderRead);
 }
 
@@ -517,6 +901,235 @@ void decoder::idwt(vk::raii::CommandBuffer & cmd, const view_buffers & views)
 		               vk::AccessFlagBits::eShaderRead);
 	}
 }
+
+void decoder::idwt_fragment(vk::raii::CommandBuffer & cmd, const view_buffers & views)
+{
+	auto & f = *fragment;
+
+	const auto layout_barrier = [](vk::Image image, vk::ImageLayout old_layout, vk::ImageLayout new_layout, vk::AccessFlags src, vk::AccessFlags dst) {
+		return vk::ImageMemoryBarrier{
+		        .srcAccessMask = src,
+		        .dstAccessMask = dst,
+		        .oldLayout = old_layout,
+		        .newLayout = new_layout,
+		        .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+		        .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+		        .image = image,
+		        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1},
+		};
+	};
+	const auto to_read_only = [&](std::span<image_allocation> images) {
+		std::vector<vk::ImageMemoryBarrier> barriers;
+		for (auto & image: images)
+			barriers.push_back(layout_barrier(image, vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits::eColorAttachmentWrite, vk::AccessFlagBits::eShaderRead));
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, barriers);
+	};
+
+	// Discard the intermediate images, previous frame may still be reading them
+	{
+		std::vector<vk::ImageMemoryBarrier> barriers;
+		for (auto & level: f.levels)
+		{
+			for (auto & pass: level.vert)
+				for (auto & image: pass)
+					barriers.push_back(layout_barrier(image, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal, {}, vk::AccessFlagBits::eColorAttachmentWrite));
+			for (auto & image: level.horiz)
+				barriers.push_back(layout_barrier(image, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal, {}, vk::AccessFlagBits::eColorAttachmentWrite));
+		}
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eColorAttachmentOutput, {}, {}, {}, barriers);
+	}
+
+	const auto sampled = [](vk::ImageView view, vk::ImageLayout layout) { return descriptor::sampled_image(view, layout); };
+	constexpr auto read_only = vk::ImageLayout::eShaderReadOnlyOptimal;
+	const vk::Sampler sampler = *mirror_repeat_sampler;
+
+	for (int input_level = decomposition_levels - 1; input_level >= 0; input_level--)
+	{
+		const int output_level = input_level - 1;
+		auto & l = f.levels[input_level];
+		const bool has_chroma_output = output_level >= 0 or chroma == chroma_subsampling::chroma_444;
+
+		// Vertical passes.
+		for (int vert_pass = 0; vert_pass < 2; vert_pass++)
+		{
+			const vk::Extent2D vert_extent{level_width(input_level), level_height(input_level) * 2};
+			std::vector<attachment> attachments{{*l.vert_views[vert_pass][0], fragment_format, vk::ImageLayout::eColorAttachmentOptimal, vert_extent}};
+			if (has_chroma_output)
+				attachments.push_back({*l.vert_views[vert_pass][1], fragment_format_cbcr, vk::ImageLayout::eColorAttachmentOptimal, vert_extent});
+
+			auto [rp, extent] = f.begin(cmd, attachments);
+
+			if (has_chroma_output)
+				push_descriptors(cmd,
+				                 vk::PipelineBindPoint::eGraphics,
+				                 *f.layout,
+				                 {
+				                         sampled(l.decoded[0][vert_pass], l.decoded_layout[0][vert_pass]),
+				                         sampled(l.decoded[0][vert_pass + 2], l.decoded_layout[0][vert_pass + 2]),
+				                         descriptor::sampler(sampler),
+				                         sampled(l.decoded[1][vert_pass], l.decoded_layout[1][vert_pass]),
+				                         sampled(l.decoded[1][vert_pass + 2], l.decoded_layout[1][vert_pass + 2]),
+				                         sampled(l.decoded[2][vert_pass], l.decoded_layout[2][vert_pass]),
+				                         sampled(l.decoded[2][vert_pass + 2], l.decoded_layout[2][vert_pass + 2]),
+				                 });
+			else
+				push_descriptors(cmd,
+				                 vk::PipelineBindPoint::eGraphics,
+				                 *f.layout,
+				                 {
+				                         sampled(l.decoded[0][vert_pass], l.decoded_layout[0][vert_pass]),
+				                         sampled(l.decoded[0][vert_pass + 2], l.decoded_layout[0][vert_pass + 2]),
+				                         descriptor::sampler(sampler),
+				                 });
+
+			const int32_t render_width = extent.width;
+			const int32_t render_height = extent.height;
+
+			// Set mirror point.
+			// Work around broken Mali r38.1 compiler.
+			// If it sees negative texture offsets it breaks the output for whatever reason (!?!?!?!).
+			const float input_width = level_width(input_level);
+			const float input_height = level_height(input_level);
+			cmd.pushConstants<fragment_push_data>(
+			        *f.layout,
+			        vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
+			        0,
+			        fragment_push_data{
+			                .uv_offset = {0, -2.0f / input_height},
+			                .half_texel_offset = {0.5f / input_width, 0.5f / input_height},
+			                .res_scale = float(render_height),
+			                .aligned_transform_size = render_height,
+			        });
+			cmd.setViewport(0, vk::Viewport{0, 0, float(render_width), float(render_height), 0, 1});
+
+			const int config = has_chroma_output ? 1 : 0;
+			const uint32_t color_count = attachments.size();
+			// Top edge condition, normal path, bottom edge condition
+			f.draw(cmd, f.pipeline(rp, color_count, config, true, false, false, -1), 0, 0, render_width, 8);
+			f.draw(cmd, f.pipeline(rp, color_count, config, true, false, false, 0), 0, 8, render_width, render_height - 16);
+			f.draw(cmd, f.pipeline(rp, color_count, config, true, false, false, +1), 0, render_height - 8, render_width, 8);
+
+			cmd.endRenderPass();
+		}
+
+		to_read_only(std::span(&l.vert[0][0], 4));
+
+		// Horizontal pass
+		std::vector<attachment> attachments;
+		for (int comp = 0; comp < (has_chroma_output ? 3 : 1); comp++)
+		{
+			if (output_level < 0 or (output_level == 0 and chroma == chroma_subsampling::chroma_420 and comp != 0))
+				attachments.push_back({views.planes[comp], output_plane_format, vk::ImageLayout::eGeneral, views.extents[comp]});
+			else
+				attachments.push_back({*f.levels[output_level].horiz_views[comp], fragment_format, vk::ImageLayout::eColorAttachmentOptimal, {level_width(output_level), level_height(output_level)}});
+		}
+
+		auto [rp, extent] = f.begin(cmd, attachments);
+
+		const auto horizontal_descriptors = [&](bool with_chroma) {
+			if (with_chroma)
+				push_descriptors(cmd,
+				                 vk::PipelineBindPoint::eGraphics,
+				                 *f.layout,
+				                 {
+				                         sampled(*l.vert_views[0][0], read_only),
+				                         sampled(*l.vert_views[1][0], read_only),
+				                         descriptor::sampler(sampler),
+				                         sampled(*l.vert_views[0][1], read_only),
+				                         sampled(*l.vert_views[1][1], read_only),
+				                 });
+			else
+				push_descriptors(cmd,
+				                 vk::PipelineBindPoint::eGraphics,
+				                 *f.layout,
+				                 {
+				                         sampled(*l.vert_views[0][0], read_only),
+				                         sampled(*l.vert_views[1][0], read_only),
+				                         descriptor::sampler(sampler),
+				                 });
+		};
+		horizontal_descriptors(has_chroma_output);
+
+		const int32_t aligned_render_width = aligned_width >> (output_level + 1);
+		const int32_t aligned_render_height = aligned_height >> (output_level + 1);
+
+		// Chroma output might be smaller than Y in output_level == 0 due to not using alignment.
+		// This is reflected in the actual render area.
+		const int32_t render_width = extent.width;
+		const int32_t render_height = extent.height;
+
+		// In case we're rendering to an output texture,
+		// the render area might be smaller than we expect for purposes of alignment.
+		// Use properly scaled viewport that we scissor away as needed.
+		const vk::Viewport viewport{0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1};
+		cmd.setViewport(0, viewport);
+
+		// Set mirror point.
+		const float input_width = level_width(input_level);
+		const float input_height = level_height(input_level) * 2;
+		const fragment_push_data push{
+		        .uv_offset = {-2.0f / input_width, 0},
+		        .half_texel_offset = {0.5f / input_width, 0.5f / input_height},
+		        .res_scale = float(aligned_render_width),
+		        .aligned_transform_size = aligned_render_width,
+		};
+		cmd.pushConstants<fragment_push_data>(*f.layout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, push);
+
+		const int config = has_chroma_output ? 2 : 0;
+		const uint32_t color_count = attachments.size();
+		const bool final_y = output_level < 0;
+		const bool final_cbcr = output_level < 0 or (output_level == 0 and chroma == chroma_subsampling::chroma_420);
+
+		// Left edge condition, normal condition, right edge condition
+		f.draw(cmd, f.pipeline(rp, color_count, config, false, final_y, final_cbcr, -1), 0, 0, 8, render_height);
+		f.draw(cmd, f.pipeline(rp, color_count, config, false, final_y, final_cbcr, 0), 8, 0, std::min(render_width - 8, aligned_render_width - 16), render_height);
+		const int32_t aligned_x = aligned_render_width - 8;
+		if (aligned_x < render_width)
+			f.draw(cmd, f.pipeline(rp, color_count, config, false, final_y, final_cbcr, +1), aligned_x, 0, render_width - aligned_x, render_height);
+
+		cmd.endRenderPass();
+
+		// If chroma is subsampled, we cannot render the fully padded region in one render pass due to
+		// rules regarding renderArea. renderArea cannot exceed the smallest image in the render pass.
+		// We cannot use subpasses either, so split the render pass, but that's mostly fine,
+		// since renderArea is non-overlapping.
+		if (output_level == 0 and chroma == chroma_subsampling::chroma_420)
+		{
+			const auto & y = attachments[0];
+			const auto & cb = attachments[1];
+			const auto fixup = [&](vk::Rect2D area) {
+				// Insert a simple by_region barrier to ensure we follow Vulkan rules for RW access.
+				cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                    vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                    vk::DependencyFlagBits::eByRegion,
+				                    vk::MemoryBarrier{.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite, .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite},
+				                    {},
+				                    {});
+				auto [rp, extent] = f.begin(cmd, std::span(&y, 1), area);
+				horizontal_descriptors(false);
+				cmd.setViewport(0, viewport);
+				cmd.pushConstants<fragment_push_data>(*f.layout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, push);
+				// Always consider edge handling.
+				f.draw(cmd, f.pipeline(rp, 1, 0, false, false, false, +1), area.offset.x, area.offset.y, area.extent.width, area.extent.height);
+				cmd.endRenderPass();
+			};
+
+			// Need vertical fixup (very common for 1080p).
+			if (cb.extent.height < y.extent.height)
+				fixup({.offset = {0, int32_t(cb.extent.height)}, .extent = {y.extent.width, y.extent.height - cb.extent.height}});
+
+			// Need horizontal fixup (very rare).
+			if (cb.extent.width < y.extent.width)
+				fixup({.offset = {int32_t(cb.extent.width), 0}, .extent = {y.extent.width - cb.extent.width, y.extent.height}});
+		}
+
+		if (output_level >= 0)
+			to_read_only(f.levels[output_level].horiz);
+	}
+
+	// Avoid WAR hazard for dequantization.
+	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, {});
+}
 } // namespace wivrn::pyrowave_core
 
 namespace wivrn
@@ -525,6 +1138,13 @@ pyrowave_core::device_caps pyrowave_decoder::caps(vk::raii::PhysicalDevice & phy
 {
 	// Only extensions are used to enable the features on the client
 	return pyrowave_core::device_caps::query(physical_device, VK_API_VERSION_1_1, application::get_vk_device_extensions());
+}
+
+bool pyrowave_decoder::use_fragment_path(const pyrowave_core::device_caps & caps)
+{
+	if (const char * env = std::getenv("WIVRN_PYROWAVE_FRAGMENT"))
+		return std::atoi(env);
+	return pyrowave_core::decoder::prefers_fragment_path(caps);
 }
 
 pyrowave_decoder::image * pyrowave_decoder::get_free()
@@ -542,15 +1162,17 @@ bool pyrowave_decoder::supported()
 	try
 	{
 		auto & physical_device = application::get_physical_device();
-		pyrowave_core::decoder::check_support(caps(physical_device));
+		auto caps = pyrowave_decoder::caps(physical_device);
+		pyrowave_core::decoder::check_support(caps);
 
 		auto props = physical_device.getFormatProperties(output_format).optimalTilingFeatures;
 		auto required = vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eCositedChromaSamples;
 		if ((props & required) != required)
 			throw std::runtime_error("pyrowave: 3-plane YCbCr 4:2:0 images are not supported");
 
+		// Color attachment support is mandatory for R8
 		auto plane_props = physical_device.getFormatProperties(vk::Format::eR8Unorm).optimalTilingFeatures;
-		if (not(plane_props & vk::FormatFeatureFlagBits::eStorageImage))
+		if (not use_fragment_path(caps) and not(plane_props & vk::FormatFeatureFlagBits::eStorageImage))
 			throw std::runtime_error("pyrowave: R8 storage images are not supported");
 
 		return true;
@@ -576,7 +1198,13 @@ pyrowave_decoder::pyrowave_decoder(
                 .width = description.width,
                 .height = description.height / (stream_index == 2 ? 2u : 1u),
         },
-        impl(device, caps(physical_device), ::shaders, extent.width, extent.height, pyrowave_core::chroma_subsampling::chroma_420),
+        impl(device,
+             caps(physical_device),
+             ::shaders,
+             extent.width,
+             extent.height,
+             pyrowave_core::chroma_subsampling::chroma_420,
+             use_fragment_path(caps(physical_device))),
         command_pool(device,
                      vk::CommandPoolCreateInfo{
                              .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
@@ -620,6 +1248,8 @@ pyrowave_decoder::pyrowave_decoder(
 		sampler_info.unlink<vk::SamplerYcbcrConversionInfo>();
 	sampler_ = vk::raii::Sampler(device, sampler_info.get());
 
+	spdlog::info("PyroWave decoder for stream {} uses the {} iDWT", stream_index, impl.output_usage() & vk::ImageUsageFlagBits::eColorAttachment ? "fragment" : "compute");
+
 	for (auto & item: image_pool)
 	{
 		item.image = image_allocation(
@@ -632,17 +1262,17 @@ pyrowave_decoder::pyrowave_decoder(
 		                .mipLevels = 1,
 		                .arrayLayers = 1,
 		                .tiling = vk::ImageTiling::eOptimal,
-		                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage,
+		                .usage = vk::ImageUsageFlagBits::eSampled | impl.output_usage(),
 		        },
 		        {.usage = VMA_MEMORY_USAGE_AUTO},
 		        "pyrowave image");
 
-		vk::ImageViewUsageCreateInfo storage_usage{.usage = vk::ImageUsageFlagBits::eStorage};
+		vk::ImageViewUsageCreateInfo output_usage{.usage = impl.output_usage()};
 		for (auto aspect: {vk::ImageAspectFlagBits::ePlane0, vk::ImageAspectFlagBits::ePlane1, vk::ImageAspectFlagBits::ePlane2})
 			item.planes.emplace_back(
 			        device,
 			        vk::ImageViewCreateInfo{
-			                .pNext = &storage_usage,
+			                .pNext = &output_usage,
 			                .image = item.image,
 			                .viewType = vk::ImageViewType::e2D,
 			                .format = vk::Format::eR8Unorm,
@@ -735,7 +1365,11 @@ void pyrowave_decoder::frame_completed(
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
 	// Contents are entirely overwritten
-	pyrowave_core::discard_to_general(cmd, item->image, vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eComputeShader, vk::AccessFlagBits::eShaderWrite);
+	pyrowave_core::discard_to_general(cmd,
+	                                  item->image,
+	                                  vk::PipelineStageFlagBits::eAllCommands,
+	                                  vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eColorAttachmentOutput,
+	                                  vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eColorAttachmentWrite);
 	item->current_layout = vk::ImageLayout::eGeneral;
 
 	const vk::Extent2D chroma_extent{extent.width / 2, extent.height / 2};

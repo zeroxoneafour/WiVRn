@@ -338,6 +338,8 @@ void settings_streaming(const settings_context & ctx)
 				return _C("Codec", "HEVC (H.265)");
 			case wivrn::av1:
 				return _C("Codec", "AV1");
+			case wivrn::pyrowave:
+				return _C("Codec", "PyroWave");
 			case wivrn::raw:
 				break;
 		}
