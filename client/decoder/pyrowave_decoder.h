@@ -40,13 +40,23 @@ namespace pyrowave_core
 {
 class decoder : public wavelet_buffers
 {
+public:
+	// Number of decodes that may be in flight
+	static constexpr int max_pending_decodes = 3;
+
+private:
 	compute_pipeline dequant_pipeline;
 	compute_pipeline idwt_pipeline[2]; // without and with DC shift
 
-	// Written by the CPU, the caller guarantees the GPU is not using them
-	buffer_allocation dequant_offset_buffer;
-	buffer_allocation payload_data;
-	std::array<vk::raii::BufferView, 3> payload_views{nullptr, nullptr, nullptr}; // u32, u16, u8
+	// Written by the CPU, used in turn by successive decodes
+	struct upload_buffers
+	{
+		buffer_allocation dequant_offset_buffer;
+		buffer_allocation payload_data;
+		std::array<vk::raii::BufferView, 3> payload_views{nullptr, nullptr, nullptr}; // u32, u16, u8
+	};
+	std::array<upload_buffers, max_pending_decodes> uploads;
+	int current_upload = 0;
 	bool use_readonly_texel_buffer;
 
 	std::vector<uint32_t> dequant_offset_buffer_cpu;
@@ -77,7 +87,8 @@ public:
 
 	// Output planes must be in general layout and writable with output_usage().
 	// With the fragment path, the command buffer must support graphics operations.
-	// The previous decode must have completed.
+	// The decode max_pending_decodes calls ago must have completed, all decodes must be
+	// submitted in order on the same queue.
 	void decode(vk::raii::CommandBuffer & cmd, const view_buffers & views);
 
 private:
@@ -85,8 +96,8 @@ private:
 
 	bool has_pristine_bands(int bands) const;
 
-	void upload_payload();
-	void dequant(vk::raii::CommandBuffer & cmd);
+	void upload_payload(upload_buffers &);
+	void dequant(vk::raii::CommandBuffer & cmd, const upload_buffers &);
 	void idwt(vk::raii::CommandBuffer & cmd, const view_buffers & views);
 	void idwt_fragment(vk::raii::CommandBuffer & cmd, const view_buffers & views);
 };
@@ -118,8 +129,13 @@ class pyrowave_decoder : public decoder
 	vk::raii::Sampler sampler_ = nullptr;
 
 	vk::raii::CommandPool command_pool;
-	vk::raii::CommandBuffer cmd = nullptr;
-	vk::raii::Fence fence;
+	struct decode_slot
+	{
+		vk::raii::CommandBuffer cmd = nullptr;
+		vk::raii::Fence fence = nullptr;
+	};
+	std::array<decode_slot, pyrowave_core::decoder::max_pending_decodes> decode_slots;
+	int current_decode_slot = 0;
 
 	std::array<image, image_count> image_pool;
 

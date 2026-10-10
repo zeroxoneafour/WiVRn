@@ -492,6 +492,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	{
 		if (encoder->stream_idx == 2 and not view_info.alpha)
 			continue;
+		encoder->set_view_info(view_info);
 		encoder->present_image(
 		        images[i].image,
 		        sem_info,

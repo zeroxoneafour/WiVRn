@@ -235,10 +235,24 @@ public:
 			return {encoder_pyrowave, video_codec::pyrowave};
 		}
 
+		// The headset lists pyrowave first when it is selected in the headset settings
+		if (not config.codec and not info.supported_codecs.empty() and info.supported_codecs.front() == video_codec::pyrowave)
+		{
+			if (not video_encoder_pyrowave::supported(vk))
+				throw std::runtime_error("Headset requested the pyrowave codec, but the GPU does not support the pyrowave encoder");
+			return {encoder_pyrowave, video_codec::pyrowave};
+		}
+
+		// pyrowave is not a hardware codec, only the pyrowave encoder handles it
+		std::vector<video_codec> hw_codecs;
+		for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
+			if (codec != video_codec::pyrowave and codec != video_codec::raw)
+				hw_codecs.push_back(codec);
+
 #if WIVRN_USE_VULKAN_ENCODE
 		if (config.name.empty() or config.name == encoder_vulkan)
 		{
-			for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
+			for (auto codec: hw_codecs)
 			{
 				if (has_vk(codec))
 					return {encoder_vulkan, codec};
@@ -249,7 +263,7 @@ public:
 #if WIVRN_USE_NVENC
 		if ((nvidia and config.name.empty()) or config.name == encoder_nvenc)
 		{
-			for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
+			for (auto codec: hw_codecs)
 			{
 				if (check_nvenc(codec))
 					return {encoder_nvenc, codec};
@@ -260,7 +274,7 @@ public:
 #if WIVRN_USE_VAAPI
 		if (config.name.empty() or config.name == encoder_vaapi)
 		{
-			for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
+			for (auto codec: hw_codecs)
 			{
 				if (check_vaapi(codec))
 					return {encoder_vaapi, codec};
@@ -268,6 +282,8 @@ public:
 		}
 #endif
 		U_LOG_W("No suitable hardware accelerated codec found");
+		if (config.name.empty() and not config.codec and std::ranges::contains(info.supported_codecs, video_codec::pyrowave) and video_encoder_pyrowave::supported(vk))
+			return {encoder_pyrowave, video_codec::pyrowave};
 #if WIVRN_USE_X264
 		if (config.name.empty() or config.name == encoder_x264)
 			return {encoder_x264, video_codec::h264};

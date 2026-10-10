@@ -121,12 +121,17 @@ endfunction()
 # Generate a copy of a third party GLSL source, named <name>, with preprocessor
 # definitions and #include support enabled, and append it to <out_list> to be
 # passed to wivrn_compile_glsl.
-# wivrn_glsl_variant(<out_list> <name> <source> [TARGET_ENV <env>] [DEFINES <NAME=VALUE>...])
+# Includes are resolved relative to INCLUDE_DIR, or the directory of the source.
+# wivrn_glsl_variant(<out_list> <name> <source> [TARGET_ENV <env>] [INCLUDE_DIR <dir>] [DEFINES <NAME=VALUE>...])
 function(wivrn_glsl_variant out_list name source)
-    cmake_parse_arguments(_args "" "TARGET_ENV" "DEFINES" ${ARGN})
+    cmake_parse_arguments(_args "" "TARGET_ENV;INCLUDE_DIR" "DEFINES" ${ARGN})
 
     cmake_path(GET source EXTENSION LAST_ONLY ext)
-    cmake_path(GET source PARENT_PATH source_dir)
+    if (_args_INCLUDE_DIR)
+        set(source_dir "${_args_INCLUDE_DIR}")
+    else()
+        cmake_path(GET source PARENT_PATH source_dir)
+    endif()
     set(output "${CMAKE_CURRENT_BINARY_DIR}/glsl_variants/${name}${ext}")
     # glslang only resolves includes relative to the including file
     cmake_path(RELATIVE_PATH source_dir BASE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/glsl_variants")

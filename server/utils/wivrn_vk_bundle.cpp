@@ -280,6 +280,8 @@ wivrn::vk_bundle::vk_bundle() :
 #endif
 // For the pyrowave encoder
 		        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+// The compositor and compute encoders compete with the applications for the GPU
+		        VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
 // For perfetto GPU timestamp tracing
 #ifdef VK_EXT_calibrated_timestamps
 		        VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
@@ -358,15 +360,39 @@ wivrn::vk_bundle::vk_bundle() :
 		}
 #endif
 
-		device = vk::raii::Device(
-		        physical_device,
-		        vk::DeviceCreateInfo{
-		                .pNext = &feat.get(),
-		                .queueCreateInfoCount = uint32_t(queues_info.size()),
-		                .pQueueCreateInfos = queues_info.data(),
-		                .enabledExtensionCount = uint32_t(device_extensions.size()),
-		                .ppEnabledExtensionNames = device_extensions.data(),
-		        });
+		vk::DeviceQueueGlobalPriorityCreateInfoKHR global_priority{
+		        .globalPriority = vk::QueueGlobalPriorityKHR::eHigh,
+		};
+		auto main_queue_info = std::ranges::find(queues_info, queue.family_index, &vk::DeviceQueueCreateInfo::queueFamilyIndex);
+		if (has_device_ext(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
+			main_queue_info->pNext = &global_priority;
+
+		auto create_device = [&] {
+			return vk::raii::Device(
+			        physical_device,
+			        vk::DeviceCreateInfo{
+			                .pNext = &feat.get(),
+			                .queueCreateInfoCount = uint32_t(queues_info.size()),
+			                .pQueueCreateInfos = queues_info.data(),
+			                .enabledExtensionCount = uint32_t(device_extensions.size()),
+			                .ppEnabledExtensionNames = device_extensions.data(),
+			        });
+		};
+		try
+		{
+			device = create_device();
+			if (main_queue_info->pNext)
+				U_LOG_I("Using high priority vulkan queue");
+		}
+		catch (vk::SystemError & e)
+		{
+			// Not permitted without CAP_SYS_NICE on some drivers
+			if (not main_queue_info->pNext or (e.code() != vk::Result::eErrorNotPermittedKHR and e.code() != vk::Result::eErrorInitializationFailed))
+				throw;
+			U_LOG_I("High priority vulkan queue not available: %s", e.what());
+			main_queue_info->pNext = nullptr;
+			device = create_device();
+		}
 
 		queue.queue = device.getQueue(queue.family_index, queue_index);
 		name(queue.queue, "compute queue");

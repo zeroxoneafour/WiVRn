@@ -528,17 +528,18 @@ decoder::decoder(vk::raii::Device & device, const device_caps & caps, const shad
 		}
 	}
 
-	dequant_offset_buffer = buffer_allocation(
-	        device,
-	        vk::BufferCreateInfo{
-	                .size = block_count_32x32 * sizeof(uint32_t),
-	                .usage = vk::BufferUsageFlagBits::eStorageBuffer,
-	        },
-	        {
-	                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-	                .usage = VMA_MEMORY_USAGE_AUTO,
-	        },
-	        "pyrowave dequant offsets");
+	for (auto & upload: uploads)
+		upload.dequant_offset_buffer = buffer_allocation(
+		        device,
+		        vk::BufferCreateInfo{
+		                .size = block_count_32x32 * sizeof(uint32_t),
+		                .usage = vk::BufferUsageFlagBits::eStorageBuffer,
+		        },
+		        {
+		                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+		                .usage = VMA_MEMORY_USAGE_AUTO,
+		        },
+		        "pyrowave dequant offsets");
 	dequant_offset_buffer_cpu.resize(block_count_32x32);
 	payload_data_cpu.reserve(1024 * 1024);
 
@@ -681,7 +682,9 @@ bool decoder::decode_is_ready(bool allow_partial_frame, int pristine_bands, floa
 
 void decoder::decode(vk::raii::CommandBuffer & cmd, const view_buffers & views)
 {
-	upload_payload();
+	auto & upload = uploads[current_upload];
+	current_upload = (current_upload + 1) % uploads.size();
+	upload_payload(upload);
 
 	// Previous frame may still be reading the wavelet images
 	memory_barrier(cmd,
@@ -691,7 +694,7 @@ void decoder::decode(vk::raii::CommandBuffer & cmd, const view_buffers & views)
 	               vk::AccessFlagBits::eShaderWrite);
 	transition_wavelet_images(cmd);
 
-	dequant(cmd);
+	dequant(cmd, upload);
 	if (fragment)
 		idwt_fragment(cmd, views);
 	else
@@ -759,8 +762,10 @@ bool decoder::has_pristine_bands(int bands) const
 	return true;
 }
 
-void decoder::upload_payload()
+void decoder::upload_payload(upload_buffers & upload)
 {
+	auto & [dequant_offset_buffer, payload_data, payload_views] = upload;
+
 	vk::DeviceSize required_size = payload_data_cpu.size() * sizeof(uint32_t);
 
 	// Avoid edge case OOB access without robustness on the payload buffer during dequant.
@@ -803,8 +808,10 @@ void decoder::upload_payload()
 	vmaFlushAllocation(vk_allocator::instance(), dequant_offset_buffer, 0, VK_WHOLE_SIZE);
 }
 
-void decoder::dequant(vk::raii::CommandBuffer & cmd)
+void decoder::dequant(vk::raii::CommandBuffer & cmd, const upload_buffers & upload)
 {
+	const auto & [dequant_offset_buffer, payload_data, payload_views] = upload;
+
 	dequant_pipeline.bind(cmd);
 
 	for (int level = 0; level < decomposition_levels; level++)
@@ -1210,14 +1217,18 @@ pyrowave_decoder::pyrowave_decoder(
                              .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
                              .queueFamilyIndex = vk_queue_family_index,
                      }),
-        fence(device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled}),
         weak_scene(scene),
         accumulator(accumulator)
 {
-	cmd = std::move(device.allocateCommandBuffers({
+	auto command_buffers = device.allocateCommandBuffers({
 	        .commandPool = *command_pool,
-	        .commandBufferCount = 1,
-	})[0]);
+	        .commandBufferCount = uint32_t(decode_slots.size()),
+	});
+	for (auto [slot, cmd]: std::views::zip(decode_slots, command_buffers))
+	{
+		slot.cmd = std::move(cmd);
+		slot.fence = vk::raii::Fence(device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
+	}
 
 	// The alpha stream only uses the luma plane
 	if (stream_index != 2)
@@ -1312,7 +1323,10 @@ pyrowave_decoder::pyrowave_decoder(
 
 pyrowave_decoder::~pyrowave_decoder()
 {
-	if (device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
+	std::vector<vk::Fence> fences;
+	for (auto & slot: decode_slots)
+		fences.push_back(*slot.fence);
+	if (device.waitForFences(fences, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("pyrowave: waitForFences failed");
 }
 
@@ -1358,6 +1372,9 @@ void pyrowave_decoder::frame_completed(
 	        item->semaphore_val,
 	        item->free);
 
+	// Only wait for the decode that used the same buffers, not the previous one
+	auto & [cmd, fence] = decode_slots[current_decode_slot];
+	current_decode_slot = (current_decode_slot + 1) % decode_slots.size();
 	if (device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("waitForFences failed");
 

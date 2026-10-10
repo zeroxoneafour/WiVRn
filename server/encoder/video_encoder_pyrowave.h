@@ -56,6 +56,8 @@ public:
 		vk::Buffer bitstream;
 		vk::DeviceSize bitstream_size;
 		size_t target_size;
+		// float per 32x32 block, see compute_rdo_distortion_scales
+		vk::Buffer rdo_distortion_scales;
 	};
 
 	static void check_support(const device_caps & caps);
@@ -66,6 +68,20 @@ public:
 		return block_count_32x32 * sizeof(bitstream_packet);
 	}
 
+	vk::DeviceSize rdo_distortion_scales_size() const
+	{
+		return block_count_32x32 * sizeof(float);
+	}
+
+	// Angular size in degrees of the encoded pixels as seen in the headset, for each column and row.
+	// Upstream PyroWave assumes a 96 DPI monitor seen at 1 m.
+	static constexpr float monitor_pixel_degrees = 0.5f / (0.34f * 96.0f);
+
+	// Weight of the distortion of each 32x32 block for the rate control, from the visual sensitivity
+	// at the frequencies of the block as seen in the headset.
+	// degrees_x and degrees_y must have width and height elements.
+	void compute_rdo_distortion_scales(std::span<float> out, std::span<const float> degrees_x, std::span<const float> degrees_y) const;
+
 	// Records the encode commands, input planes must be in general layout
 	void encode(vk::raii::CommandBuffer & cmd, const view_buffers & views, const bitstream_buffers & buffers);
 
@@ -73,14 +89,15 @@ public:
 	bool packetize(std::vector<uint8_t> & out, std::span<const bitstream_packet> meta, std::span<const uint32_t> bitstream) const;
 
 private:
-	float get_quant_rdo_distortion_scale(int level, int component, int band) const;
+	// cpd_nyquist: cycles per degree at the Nyquist frequency of the full resolution image
+	float get_quant_rdo_distortion_scale(int level, int component, int band, float cpd_nyquist_x, float cpd_nyquist_y) const;
 
 	float get_quant_resolution(int level, int component, int band) const;
 
 	float get_noise_power_normalized_quant_resolution(int level, int component, int band) const;
 
 	void dwt(vk::raii::CommandBuffer & cmd, const view_buffers & views);
-	void quant(vk::raii::CommandBuffer & cmd);
+	void quant(vk::raii::CommandBuffer & cmd, const bitstream_buffers & buffers);
 	void analyze_rdo(vk::raii::CommandBuffer & cmd);
 	void resolve_rdo(vk::raii::CommandBuffer & cmd, size_t target_payload_size);
 	void block_packing(vk::raii::CommandBuffer & cmd, const bitstream_buffers & buffers);
@@ -103,6 +120,7 @@ class video_encoder_pyrowave : public video_encoder
 		vk::raii::Fence fence = nullptr;
 		buffer_allocation meta, bitstream;           // written by the GPU
 		buffer_allocation host_meta, host_bitstream; // read by the CPU
+		buffer_allocation rdo_distortion_scales;     // written by the CPU
 		std::vector<uint8_t> output;
 	};
 	std::array<slot_t, num_slots> slots;
@@ -114,6 +132,10 @@ class video_encoder_pyrowave : public video_encoder
 		std::vector<vk::raii::ImageView> views;
 	};
 	std::vector<input_t> inputs;
+
+	// View parameters the rate control weights are computed for
+	std::optional<to_headset::video_stream_data_shard::view_info_t> rdo_view_info;
+	std::vector<float> rdo_distortion_scales;
 
 	// The alpha stream is in the top half of the luma plane of the compositor image, it is copied
 	// so that the sampled image has the size of the stream.
@@ -131,6 +153,8 @@ public:
 	static bool supported(vk_bundle & vk);
 	video_encoder_pyrowave(vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);
 	~video_encoder_pyrowave();
+
+	void set_view_info(const to_headset::video_stream_data_shard::view_info_t &) override;
 
 protected:
 	void present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t slot_idx, uint64_t) override;

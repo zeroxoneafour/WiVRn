@@ -32,7 +32,9 @@
 #include "wivrn-server_shaders.h"
 
 #include <cmath>
+#include <cstring>
 #include <format>
+#include <numeric>
 #include <ranges>
 
 namespace
@@ -47,6 +49,54 @@ public:
 		return false;
 	}
 };
+
+// Angular size in degrees of the encoded pixels along an axis
+// foveation: foveation parameters of the axis, see to_headset::foveation_parameter
+// tan_begin, tan_end: tangent of the view angles at the edges of the source image
+std::vector<float> pixel_degrees(const std::vector<uint16_t> & foveation, float tan_begin, float tan_end, size_t size)
+{
+	// Number of source pixels of each encoded pixel
+	std::vector<float> ratio;
+	ratio.reserve(size);
+	const int n_ratio = int(foveation.size()) / 2;
+	for (auto [i, n]: std::views::enumerate(foveation))
+		ratio.insert(ratio.end(), n, float(std::abs(n_ratio - int(i)) + 1));
+	if (ratio.empty())
+		ratio.push_back(1);
+	ratio.resize(size, ratio.back());
+
+	const double source_size = std::accumulate(ratio.begin(), ratio.end(), 0.0);
+	const double source_pixel_tan = std::abs(tan_end - tan_begin) / source_size;
+	if (not std::isnormal(source_pixel_tan))
+		return std::vector<float>(size, wivrn::pyrowave_core::encoder::monitor_pixel_degrees);
+
+	std::vector<float> degrees;
+	degrees.reserve(size);
+	double position = 0;
+	for (float r: ratio)
+	{
+		// Pixels are uniform in tangent space, d(atan(t))/dt = 1 / (1 + t²)
+		double t = std::lerp(double(tan_begin), double(tan_end), (position + r / 2) / source_size);
+		degrees.push_back(r * source_pixel_tan / (1 + t * t) * 180 / M_PI);
+		position += r;
+	}
+	return degrees;
+}
+
+bool same_view(const wivrn::to_headset::video_stream_data_shard::view_info_t & a,
+               const wivrn::to_headset::video_stream_data_shard::view_info_t & b)
+{
+	for (int i = 0; i < 2; ++i)
+	{
+		const auto & fa = a.fov[i];
+		const auto & fb = b.fov[i];
+		if (fa.angleLeft != fb.angleLeft or fa.angleRight != fb.angleRight or fa.angleUp != fb.angleUp or fa.angleDown != fb.angleDown)
+			return false;
+		if (a.foveation[i].x != b.foveation[i].x or a.foveation[i].y != b.foveation[i].y)
+			return false;
+	}
+	return true;
+}
 } // namespace
 
 namespace wivrn::pyrowave_core
@@ -80,7 +130,8 @@ struct quantizer_push_data
 	float quant_resolution;
 	int32_t block_offset;
 	int32_t block_stride;
-	float rdo_distortion_scale;
+	int32_t block_offset_32x32;
+	int32_t block_stride_32x32;
 };
 
 struct block_packing_push_data
@@ -191,7 +242,7 @@ encoder::encoder(vk::raii::Device & device, const device_caps & caps, const shad
 	        device,
 	        shaders,
 	        "pyrowave_wavelet_quant",
-	        {type::eCombinedImageSampler, type::eStorageBuffer, type::eStorageBuffer, type::eStorageBuffer},
+	        {type::eCombinedImageSampler, type::eStorageBuffer, type::eStorageBuffer, type::eStorageBuffer, type::eStorageBuffer},
 	        sizeof(quantizer_push_data),
 	        require(caps.subgroup_for(3, 7, 128)));
 
@@ -274,7 +325,7 @@ void encoder::encode(vk::raii::CommandBuffer & cmd, const view_buffers & views, 
 	               vk::PipelineStageFlagBits::eComputeShader,
 	               vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
 
-	quant(cmd);
+	quant(cmd, buffers);
 	analyze_rdo(cmd);
 	resolve_rdo(cmd, buffers.target_size);
 	block_packing(cmd, buffers);
@@ -324,20 +375,66 @@ bool encoder::packetize(std::vector<uint8_t> & out, std::span<const bitstream_pa
 	return true;
 }
 
-float encoder::get_quant_rdo_distortion_scale(int level, int component, int band) const
+void encoder::compute_rdo_distortion_scales(std::span<float> out, std::span<const float> degrees_x, std::span<const float> degrees_y) const
+{
+	assert(out.size() >= size_t(block_count_32x32));
+	assert(degrees_x.size() == size_t(width) and degrees_y.size() == size_t(height));
+
+	const auto prefix_sum = [](std::span<const float> values) {
+		std::vector<double> sum(values.size() + 1);
+		for (size_t i = 0; i < values.size(); ++i)
+			sum[i + 1] = sum[i] + values[i];
+		return sum;
+	};
+	// Mean pixel size over [begin, end), clamped to the image
+	const auto mean = [](const std::vector<double> & sum, int begin, int end) {
+		const int size = sum.size() - 1;
+		begin = std::min(begin, size - 1);
+		end = std::clamp(end, begin + 1, size);
+		return float((sum[end] - sum[begin]) / (end - begin));
+	};
+	const auto sum_x = prefix_sum(degrees_x);
+	const auto sum_y = prefix_sum(degrees_y);
+
+	for (int level = 0; level < decomposition_levels; level++)
+	{
+		// The 32x32 blocks of the level cover 32 * 2^(level+1) pixels of the full resolution image.
+		// Chroma is subsampled and starts at level 1, so this is the same for all components.
+		const int shift = level + 1 + 5;
+
+		for (int component = 0; component < num_components; component++)
+		{
+			if (skip(level, component, chroma))
+				continue;
+
+			for (int band = first_band(level); band < 4; band++)
+			{
+				const auto & meta = block_meta[component][level][band];
+				for (int i = 0; i < meta.block_count_32x32; i++)
+				{
+					const int x = i % meta.block_stride_32x32;
+					const int y = i / meta.block_stride_32x32;
+					const float size_x = mean(sum_x, x << shift, (x + 1) << shift);
+					const float size_y = mean(sum_y, y << shift, (y + 1) << shift);
+
+					// The distortion is not weighted by the solid angle of the block: this would favour the
+					// periphery at the expense of the center, where the user looks most of the time.
+					out[meta.block_offset_32x32 + i] =
+					        get_quant_rdo_distortion_scale(level, component, band, 0.5f / size_x, 0.5f / size_y) * (1.0f / 256.0f);
+				}
+			}
+		}
+	}
+}
+
+float encoder::get_quant_rdo_distortion_scale(int level, int component, int band, float cpd_nyquist_x, float cpd_nyquist_y) const
 {
 	// From my Linelet master thesis. Copy paste 11 years later, ah yes :D
 	float horiz_midpoint = (band & 1) ? 0.75f : 0.25f;
 	float vert_midpoint = (band & 2) ? 0.75f : 0.25f;
 
-	// Normal PC monitors.
-	constexpr float dpi = 96.0f;
-	// Compromise between couch gaming and desktop.
-	constexpr float viewing_distance = 1.0f;
-	constexpr float cpd_nyquist = 0.34f * viewing_distance * dpi;
-
-	float cpd = std::sqrt(horiz_midpoint * horiz_midpoint + vert_midpoint * vert_midpoint) *
-	            cpd_nyquist * std::exp2(-float(level));
+	float cpd = std::hypot(horiz_midpoint * cpd_nyquist_x, vert_midpoint * cpd_nyquist_y) *
+	            std::exp2(-float(level));
 
 	// Don't allow a situation where we're quantizing LL band hard.
 	cpd = std::max(cpd, 8.0f);
@@ -449,7 +546,7 @@ void encoder::dwt(vk::raii::CommandBuffer & cmd, const view_buffers & views)
 	}
 }
 
-void encoder::quant(vk::raii::CommandBuffer & cmd)
+void encoder::quant(vk::raii::CommandBuffer & cmd, const bitstream_buffers & buffers)
 {
 	quant_pipeline.bind(cmd);
 
@@ -466,6 +563,7 @@ void encoder::quant(vk::raii::CommandBuffer & cmd)
 			                                        descriptor::storage_buffer(meta_buffer),
 			                                        descriptor::storage_buffer(block_stat_buffer),
 			                                        descriptor::storage_buffer(payload_data),
+			                                        descriptor::storage_buffer(buffers.rdo_distortion_scales, 0, rdo_distortion_scales_size()),
 			                                });
 
 			for (int band = first_band(level); band < 4; band++)
@@ -480,7 +578,8 @@ void encoder::quant(vk::raii::CommandBuffer & cmd)
 				        .quant_resolution = 1.0f / decode_quant(encode_quant(1.0f / quant_res)),
 				        .block_offset = block_meta[component][level][band].block_offset_8x8,
 				        .block_stride = block_meta[component][level][band].block_stride_8x8,
-				        .rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band) * (1.0f / 256.0f),
+				        .block_offset_32x32 = block_meta[component][level][band].block_offset_32x32,
+				        .block_stride_32x32 = block_meta[component][level][band].block_stride_32x32,
 				};
 				quant_pipeline.push_constants(cmd, push);
 				cmd.dispatch((level_width(level) + 31) / 32, (level_height(level) + 31) / 32, 1);
@@ -803,8 +902,16 @@ video_encoder_pyrowave::video_encoder_pyrowave(vk_bundle & vk, const encoder_set
 		slot.fence = vk::raii::Fence(vk.device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
 		slot.meta = make_buffer(encoder.meta_required_size(), vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc, false, std::format("pyrowave meta {}", stream_idx));
 		slot.host_meta = make_buffer(encoder.meta_required_size(), vk::BufferUsageFlagBits::eTransferDst, true, std::format("pyrowave host meta {}", stream_idx));
+		slot.rdo_distortion_scales = make_buffer(encoder.rdo_distortion_scales_size(), vk::BufferUsageFlagBits::eStorageBuffer, true, std::format("pyrowave rdo distortion scales {}", stream_idx));
 		ensure_buffers(slot, target_size());
 	}
+
+	// Until the view is known
+	rdo_distortion_scales.resize(encoder.block_count_32x32);
+	encoder.compute_rdo_distortion_scales(
+	        rdo_distortion_scales,
+	        std::vector<float>(extent.width, pyrowave_core::encoder::monitor_pixel_degrees),
+	        std::vector<float>(extent.height, pyrowave_core::encoder::monitor_pixel_degrees));
 }
 
 video_encoder_pyrowave::~video_encoder_pyrowave()
@@ -814,6 +921,46 @@ video_encoder_pyrowave::~video_encoder_pyrowave()
 		fences.push_back(*slot.fence);
 	if (vk.device.waitForFences(fences, true, 1'000'000'000) == vk::Result::eTimeout)
 		U_LOG_E("pyrowave: timeout waiting for encoder %d", stream_idx);
+}
+
+void video_encoder_pyrowave::set_view_info(const to_headset::video_stream_data_shard::view_info_t & view_info)
+{
+	if (rdo_view_info and same_view(*rdo_view_info, view_info))
+		return;
+	rdo_view_info = view_info;
+
+	// The alpha stream has both eyes side by side at half resolution
+	const bool alpha = stream_idx == 2;
+	const uint32_t eye_height = alpha ? extent.height * 2 : extent.height;
+
+	auto eye_degrees = [&](int eye) {
+		const auto & fov = view_info.fov[eye];
+		const auto & foveation = view_info.foveation[eye];
+		return std::pair{
+		        pixel_degrees(foveation.x, std::tan(fov.angleLeft), std::tan(fov.angleRight), extent.width),
+		        pixel_degrees(foveation.y, std::tan(fov.angleUp), std::tan(fov.angleDown), eye_height),
+		};
+	};
+
+	std::vector<float> degrees_x, degrees_y;
+	if (not alpha)
+	{
+		std::tie(degrees_x, degrees_y) = eye_degrees(stream_idx);
+	}
+	else
+	{
+		std::array eyes{eye_degrees(0), eye_degrees(1)};
+		const uint32_t half_width = extent.width / 2;
+		const auto sum2 = [](const std::vector<float> & v, size_t i) {
+			return v[std::min(i, v.size() - 1)] + v[std::min(i + 1, v.size() - 1)];
+		};
+		for (uint32_t x = 0; x < extent.width; ++x)
+			degrees_x.push_back(sum2(eyes[x < half_width ? 0 : 1].first, 2 * (x % half_width)));
+		for (uint32_t y = 0; y < extent.height; ++y)
+			degrees_y.push_back(sum2(eyes[0].second, 2 * y));
+	}
+
+	encoder.compute_rdo_distortion_scales(rdo_distortion_scales, degrees_x, degrees_y);
 }
 
 void video_encoder_pyrowave::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t slot_idx, uint64_t)
@@ -833,6 +980,9 @@ void video_encoder_pyrowave::present_image(vk::Image y_cbcr, vk::SemaphoreSubmit
 	const auto target = target_size();
 	ensure_buffers(slot, target);
 
+	std::memcpy(slot.rdo_distortion_scales.data(), rdo_distortion_scales.data(), encoder.rdo_distortion_scales_size());
+	vmaFlushAllocation(vk_allocator::instance(), slot.rdo_distortion_scales, 0, VK_WHOLE_SIZE);
+
 	auto & cmd = slot.cmd;
 	cmd.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
@@ -844,6 +994,7 @@ void video_encoder_pyrowave::present_image(vk::Image y_cbcr, vk::SemaphoreSubmit
 	                       .bitstream = slot.bitstream,
 	                       .bitstream_size = slot.bitstream.info().size,
 	                       .target_size = target,
+	                       .rdo_distortion_scales = slot.rdo_distortion_scales,
 	               });
 
 	cmd.copyBuffer(slot.meta, slot.host_meta, vk::BufferCopy{.size = slot.meta.info().size});

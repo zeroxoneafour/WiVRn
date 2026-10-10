@@ -21,7 +21,8 @@
 // PyroWave is an intra-only wavelet codec implemented in Vulkan compute shaders,
 // see https://github.com/Themaister/pyrowave
 // This is a port of pyrowave_common.{hpp,cpp} from Granite to vulkan-hpp.
-// The shaders are compiled as-is from the upstream repository.
+// The shaders are compiled from the upstream repository, except for the rate control
+// shaders of the encoder which are modified, see server/encoder/shaders.
 //
 // Copyright (c) 2025 Hans-Kristian Arntzen
 // SPDX-License-Identifier: MIT

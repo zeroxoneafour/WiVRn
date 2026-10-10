@@ -125,6 +125,9 @@ public:
 	video_encoder(vk_bundle &, uint8_t stream_idx, uint32_t target_queue, const encoder_settings & settings, std::unique_ptr<idr_handler>, bool async_send);
 	virtual ~video_encoder();
 
+	// Called before present_image with the view parameters of the image
+	virtual void set_view_info(const to_headset::video_stream_data_shard::view_info_t &) {}
+
 	void present_image(vk::Image y_cbcr,
 	                   vk::SemaphoreSubmitInfo sem_info,
 	                   uint64_t frame_index);
