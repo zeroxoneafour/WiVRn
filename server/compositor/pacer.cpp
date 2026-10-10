@@ -125,45 +125,8 @@ void pacer::predict(
 	out_present_slop_ns = slop_ns;
 }
 
-/*  */void pacer::on_feedback(const wivrn::from_headset::feedback & feedback, const clock_offset & offset)
+void pacer::on_feedback(const wivrn::from_headset::feedback & feedback, const clock_offset & offset)
 {
-	// FIXME: temporary per-frame timing dump to investigate pyrowave latency
-	{
-		static FILE * dump = [] {
-			FILE * f = fopen("/tmp/wivrn-pacer.csv", "w");
-			if (f)
-				fprintf(f, "frame,stream,times_displayed,present,predicted_display,encode_begin,encode_end,send_begin,send_end,received_first,received_last,decoded,blitted,displayed,safe_present_to_decoded,mean_render_to_display,mean_wake_up_to_present\n");
-			return f;
-		}();
-		if (dump)
-		{
-			std::lock_guard lock(mutex);
-			const auto & when = in_flight_frames[feedback.frame_index % in_flight_frames.size()];
-			const bool known = when.frame_id == int64_t(feedback.frame_index);
-			auto t = [&](XrTime headset) { return headset ? offset.from_headset(headset) : 0; };
-			fprintf(dump,
-			        "%lu,%d,%d,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
-			        feedback.frame_index,
-			        int(feedback.stream_index),
-			        int(feedback.times_displayed),
-			        known ? when.present_ns : 0,
-			        known ? when.predicted_display_time : 0,
-			        t(feedback.encode_begin),
-			        t(feedback.encode_end),
-			        t(feedback.send_begin),
-			        t(feedback.send_end),
-			        t(feedback.received_first_packet),
-			        t(feedback.received_last_packet),
-			        t(feedback.received_from_decoder),
-			        t(feedback.blitted),
-			        t(feedback.displayed),
-			        int64_t(safe_present_to_decoded_ns),
-			        int64_t(mean_render_to_display_ns),
-			        int64_t(mean_wake_up_to_present_ns));
-			fflush(dump);
-		}
-	}
-
 	if (feedback.times_displayed > 1 or not feedback.blitted)
 		return;
 
