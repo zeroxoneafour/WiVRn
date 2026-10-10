@@ -8,6 +8,9 @@
 // - the distortion of discarding a whole block is also scaled, upstream lost this
 //   scale when moving it from the analysis pass, which made rate control discard
 //   blocks of the low frequency bands much too easily
+// - the distortion is stored scaled by DISTORTION_STORAGE_SCALE, the low frequency
+//   bands otherwise saturate the float16 range and rate control sees no difference
+//   between coarse quantization and discarding them
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -85,6 +88,9 @@ layout(push_constant) uniform Registers
 
 // Distortion scale of the 32x32 block of the workgroup
 float rdo_distortion_scale;
+
+// Must match pyrowave_analyze_rate_control.comp
+const float DISTORTION_STORAGE_SCALE = 1.0 / 1024.0;
 
 float max4(vec4 v)
 {
@@ -262,7 +268,7 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels)
         if ((gl_SubgroupInvocationID & 7u) == 0)
         {
             block_stats.stats[block_index].errors[q] = QuantStats(
-                float16_t(min(square_error, 60000.0)),
+                float16_t(min(square_error * DISTORTION_STORAGE_SCALE, 60000.0)),
                 uint16_t(quant_result.encode_cost_late_bits));
         }
     }
@@ -270,7 +276,7 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels)
     // Record distortion for throwing away everything.
     float square_error = subgroupClusteredAdd((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * inv_quant_squared * rdo_distortion_scale, 8);
     if ((gl_SubgroupInvocationID & 7u) == 0)
-        block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(min(60000.0, square_error)), uint16_t(0));
+        block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(min(60000.0, square_error * DISTORTION_STORAGE_SCALE)), uint16_t(0));
 
     uint byte_offset = scan + global_offset;
     bool need_sign = result.block4x2_shifted != 0 || quality_planes != 0;

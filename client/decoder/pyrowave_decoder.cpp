@@ -1354,6 +1354,16 @@ void pyrowave_decoder::frame_completed(
 		return;
 	}
 
+	// Only wait for the decode that used the same buffers, not the previous one.
+	// This runs on the network thread: when the GPU is behind, drop the frame instead of blocking,
+	// waiting would stop receiving packets and delay or lose the frames of all streams.
+	auto & [cmd, fence] = decode_slots[current_decode_slot];
+	if (fence.getStatus() != vk::Result::eSuccess)
+	{
+		spdlog::debug("pyrowave: GPU is behind, discard frame");
+		return;
+	}
+
 	auto item = get_free();
 	if (not item)
 	{
@@ -1372,11 +1382,7 @@ void pyrowave_decoder::frame_completed(
 	        item->semaphore_val,
 	        item->free);
 
-	// Only wait for the decode that used the same buffers, not the previous one
-	auto & [cmd, fence] = decode_slots[current_decode_slot];
 	current_decode_slot = (current_decode_slot + 1) % decode_slots.size();
-	if (device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
-		spdlog::warn("waitForFences failed");
 
 	cmd.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});

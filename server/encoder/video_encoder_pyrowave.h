@@ -47,7 +47,15 @@ class encoder : public wavelet_buffers
 
 	uint32_t sequence_count = 0;
 
+	// Only encode the Y plane, the decoder gets zero chroma
+	bool luma_only;
+
 	buffer_allocation make_buffer(vk::DeviceSize size, const char * name);
+
+	bool skip_component(int level, int component) const
+	{
+		return (luma_only and component != 0) or skip(level, component, chroma);
+	}
 
 public:
 	struct bitstream_buffers
@@ -61,7 +69,7 @@ public:
 	};
 
 	static void check_support(const device_caps & caps);
-	encoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma);
+	encoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma, bool luma_only = false);
 
 	vk::DeviceSize meta_required_size() const
 	{
@@ -82,7 +90,8 @@ public:
 	// degrees_x and degrees_y must have width and height elements.
 	void compute_rdo_distortion_scales(std::span<float> out, std::span<const float> degrees_x, std::span<const float> degrees_y) const;
 
-	// Records the encode commands, input planes must be in general layout
+	// Records the encode commands, input planes must be in general layout.
+	// Chroma planes are not read when luma_only is set.
 	void encode(vk::raii::CommandBuffer & cmd, const view_buffers & views, const bitstream_buffers & buffers);
 
 	// Build the frame from the block packets written by encode, returns false on error
@@ -140,7 +149,7 @@ class video_encoder_pyrowave : public video_encoder
 	// The alpha stream is in the top half of the luma plane of the compositor image, it is copied
 	// so that the sampled image has the size of the stream.
 	image_allocation alpha_image;
-	std::vector<vk::raii::ImageView> alpha_views; // luma, constant chroma
+	vk::raii::ImageView alpha_view = nullptr;
 
 	buffer_allocation make_buffer(vk::DeviceSize size, vk::BufferUsageFlags usage, bool host, const std::string & name);
 	pyrowave_core::view_buffers input_views(vk::raii::CommandBuffer & cmd, vk::Image image);

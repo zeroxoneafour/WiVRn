@@ -216,8 +216,9 @@ void encoder::check_support(const device_caps & caps)
 		throw std::runtime_error("pyrowave: no compatible subgroup size");
 }
 
-encoder::encoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma) :
-        wavelet_buffers(device, width, height, chroma)
+encoder::encoder(vk::raii::Device & device, const device_caps & caps, const shader_map & shaders, int width, int height, chroma_subsampling chroma, bool luma_only) :
+        wavelet_buffers(device, width, height, chroma),
+        luma_only(luma_only)
 {
 	check_support(caps);
 
@@ -315,6 +316,9 @@ void encoder::encode(vk::raii::CommandBuffer & cmd, const view_buffers & views, 
 	cmd.fillBuffer(payload_data, 0, 2 * sizeof(uint32_t), 0);
 	cmd.fillBuffer(bucket_buffer, 0, vk::WholeSize, 0);
 	cmd.fillBuffer(quant_buffer, 0, vk::WholeSize, 0);
+	// Block packing does not write the packets of the chroma blocks
+	if (luma_only)
+		cmd.fillBuffer(buffers.meta, 0, meta_required_size(), 0);
 
 	dwt(cmd, views);
 
@@ -404,7 +408,7 @@ void encoder::compute_rdo_distortion_scales(std::span<float> out, std::span<cons
 
 		for (int component = 0; component < num_components; component++)
 		{
-			if (skip(level, component, chroma))
+			if (skip_component(level, component))
 				continue;
 
 			for (int band = first_band(level); band < 4; band++)
@@ -500,6 +504,9 @@ void encoder::dwt(vk::raii::CommandBuffer & cmd, const view_buffers & views)
 
 		for (int c = 0; c < num_components; c++)
 		{
+			if (luma_only and c != 0)
+				continue;
+
 			vk::ImageView input;
 			dwt_push_data component_push = push;
 			bool dc_shift = false;
@@ -554,7 +561,7 @@ void encoder::quant(vk::raii::CommandBuffer & cmd, const bitstream_buffers & buf
 	{
 		for (int component = 0; component < num_components; component++)
 		{
-			if (skip(level, component, chroma))
+			if (skip_component(level, component))
 				continue;
 
 			quant_pipeline.push_descriptors(cmd,
@@ -609,7 +616,7 @@ void encoder::analyze_rdo(vk::raii::CommandBuffer & cmd)
 	{
 		for (int component = 0; component < num_components; component++)
 		{
-			if (skip(level, component, chroma))
+			if (skip_component(level, component))
 				continue;
 
 			for (int band = first_band(level); band < 4; band++)
@@ -691,7 +698,7 @@ void encoder::block_packing(vk::raii::CommandBuffer & cmd, const bitstream_buffe
 	{
 		for (int component = 0; component < num_components; component++)
 		{
-			if (skip(level, component, chroma))
+			if (skip_component(level, component))
 				continue;
 
 			for (int band = first_band(level); band < 4; band++)
@@ -757,9 +764,10 @@ pyrowave_core::view_buffers video_encoder_pyrowave::input_views(vk::raii::Comman
 		                      .extent = {extent.width, extent.height, 1},
 		              });
 		pyrowave_core::memory_barrier(cmd, vk::PipelineStageFlagBits::eTransfer, vk::AccessFlagBits::eTransferWrite, vk::PipelineStageFlagBits::eComputeShader, vk::AccessFlagBits::eShaderRead);
+		// The encoder is luma only for the alpha stream
 		return {
-		        .planes = {*alpha_views[0], *alpha_views[1], *alpha_views[1]},
-		        .extents = {extent, chroma_extent, chroma_extent},
+		        .planes = {*alpha_view},
+		        .extents = {extent},
 		};
 	}
 
@@ -841,7 +849,9 @@ video_encoder_pyrowave::video_encoder_pyrowave(vk_bundle & vk, const encoder_set
                 ::shaders,
                 settings.width,
                 settings.height,
-                pyrowave_core::chroma_subsampling::chroma_420),
+                pyrowave_core::chroma_subsampling::chroma_420,
+                // The decoder only uses the luma of the alpha stream
+                stream_idx == 2),
         cmd_pool(vk.device,
                  vk::CommandPoolCreateInfo{
                          .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
@@ -880,16 +890,14 @@ video_encoder_pyrowave::video_encoder_pyrowave(vk_bundle & vk, const encoder_set
 		        },
 		        {.usage = VMA_MEMORY_USAGE_AUTO},
 		        "pyrowave alpha");
-		for (auto swizzle: {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eZero})
-			alpha_views.emplace_back(
-			        vk.device,
-			        vk::ImageViewCreateInfo{
-			                .image = alpha_image,
-			                .viewType = vk::ImageViewType::e2D,
-			                .format = plane_formats[0],
-			                .components = {swizzle, swizzle, swizzle, swizzle},
-			                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1},
-			        });
+		alpha_view = vk::raii::ImageView(
+		        vk.device,
+		        vk::ImageViewCreateInfo{
+		                .image = alpha_image,
+		                .viewType = vk::ImageViewType::e2D,
+		                .format = plane_formats[0],
+		                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1},
+		        });
 	}
 	auto command_buffers = vk.device.allocateCommandBuffers({
 	        .commandPool = *cmd_pool,
@@ -900,7 +908,7 @@ video_encoder_pyrowave::video_encoder_pyrowave(vk_bundle & vk, const encoder_set
 	{
 		slot.cmd = std::move(cmd);
 		slot.fence = vk::raii::Fence(vk.device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
-		slot.meta = make_buffer(encoder.meta_required_size(), vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc, false, std::format("pyrowave meta {}", stream_idx));
+		slot.meta = make_buffer(encoder.meta_required_size(), vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst, false, std::format("pyrowave meta {}", stream_idx));
 		slot.host_meta = make_buffer(encoder.meta_required_size(), vk::BufferUsageFlagBits::eTransferDst, true, std::format("pyrowave host meta {}", stream_idx));
 		slot.rdo_distortion_scales = make_buffer(encoder.rdo_distortion_scales_size(), vk::BufferUsageFlagBits::eStorageBuffer, true, std::format("pyrowave rdo distortion scales {}", stream_idx));
 		ensure_buffers(slot, target_size());

@@ -44,6 +44,8 @@ namespace wivrn
 {
 
 static const double passthrough_bitrate_factor = 0.05;
+// pyrowave only has intra frames, it cannot reuse the mostly static alpha of the previous frames
+static const double pyrowave_passthrough_bitrate_factor = 0.25;
 
 static void split_bitrate(std::array<wivrn::encoder_settings, 3> & encoders, uint64_t bitrate)
 {
@@ -53,7 +55,7 @@ static void split_bitrate(std::array<wivrn::encoder_settings, 3> & encoders, uin
 	{
 		double w = encoder.width * encoder.height;
 		if (i == 2)
-			w *= passthrough_bitrate_factor;
+			w *= encoder.codec == wivrn::pyrowave ? pyrowave_passthrough_bitrate_factor : passthrough_bitrate_factor;
 		switch (encoder.codec)
 		{
 			case wivrn::h264:
