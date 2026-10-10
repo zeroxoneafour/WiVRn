@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <glm/ext/quaternion_trigonometric.hpp>
 #include <limits>
 #include <optional>
@@ -137,7 +138,14 @@ std::optional<std::unordered_set<std::string>> env(std::string_view name)
 	if (not values)
 		return std::nullopt;
 
+#if defined(__cpp_lib_containers_ranges) && __cpp_lib_containers_ranges >= 202202L
 	return std::unordered_set<std::string>{std::from_range, utils::split(*values, ",")};
+#else
+	std::optional<std::unordered_set<std::string>> res{std::in_place};
+	for (auto & val: utils::split(*values))
+		res->insert(std::move(val));
+	return res;
+#endif
 }
 
 void hmd_traits::init()
@@ -256,6 +264,13 @@ void hmd_traits::init()
 		// Accepts OpenXR 1.1 but doesn't actually implement it
 		max_openxr_api_version = XR_API_VERSION_1_0;
 
+		// The runtime auto-switches /user/hand/* between the controller profile and
+		// ext/hand_interaction_ext based on its own hand-vs-controller heuristic, which
+		// flips repeatedly while a controller is actively held, dropping controller button
+		// input whenever hand interaction is briefly active. The runtime can only switch to
+		// a profile the app suggested bindings for, so withhold the extension entirely.
+		blacklisted_extensions.insert(XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
+
 		// Doesn't handle additive blend, so needs specific ray model
 		// Fixed in XR elite firmware version 2.0
 		bool need_htc_ray = true;
@@ -309,6 +324,41 @@ void hmd_traits::init()
 			permissions[feature::face_tracking] = "android.permission.FACE_TRACKING";
 		}
 	}
+#else // not android
+	for (const auto & entry: std::filesystem::directory_iterator("/sys/class/drm"))
+	{
+		std::ifstream modes(entry.path() / "modes");
+		if (not modes)
+			continue;
+
+		std::string mode;
+		while (std::getline(modes, mode))
+		{
+			// panel modes are reported as `2*2160x2160_120` etc.
+			if (not mode.starts_with("2*"))
+				// not a HMD
+				continue;
+
+			const auto x = mode.find('x', 2);
+			if (x == std::string::npos)
+				continue;
+
+			try
+			{
+				panel_width_override = std::stoul(mode.substr(2, x - 2));
+				spdlog::info("Detected native panel mode {}, panel width {}", mode, panel_width_override);
+				break;
+			}
+			catch (...)
+			{
+				spdlog::warn("Failed to parse native panel mode {}", mode);
+			}
+		}
+
+		if (panel_width_override > 0)
+			break;
+	}
+
 #endif
 
 	spdlog::info("HMD traits initialized");

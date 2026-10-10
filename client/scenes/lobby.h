@@ -81,6 +81,11 @@ class lobby : public scene_impl<lobby>
 
 	xr::face_tracker face_tracker;
 
+	// STAGE space translated by the configured player height offset, so it previews here the
+	// same shift a stream would apply; recreated only when the offset actually changes.
+	xr::space height_offset_space;
+	float applied_height_offset = 0;
+
 	std::string selected_item;
 	std::unique_ptr<utils::mapped_file> license;
 
@@ -252,7 +257,7 @@ class lobby : public scene_impl<lobby>
 	void connect(const configuration::server_data & data);
 	std::unique_ptr<wivrn_session> connect_to_session(wivrn_discover::service service, bool manual_connection);
 
-	std::optional<glm::vec3> check_recenter_gesture(xr::spaces space, const std::optional<std::array<xr::hand_tracker::joint, XR_HAND_JOINT_COUNT_EXT>> & joints, const std::pair<glm::vec3, glm::quat> & head_pose);
+	std::optional<glm::vec3> check_recenter_gesture(xr::spaces space, const xr::hand_tracker::joint_array & joints, const std::pair<glm::vec3, glm::quat> & head_pose);
 	std::optional<glm::vec3> check_recenter_action(XrTime predicted_display_time, glm::vec3 head_position);
 	std::optional<glm::vec3> check_recenter_gui(glm::vec3 head_position, glm::quat head_orientation);
 

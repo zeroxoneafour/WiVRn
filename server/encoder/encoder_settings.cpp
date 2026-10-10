@@ -228,7 +228,7 @@ public:
 
 		if (config.codec == video_codec::pyrowave or config.name == encoder_pyrowave)
 		{
-			if (not std::ranges::contains(info.supported_codecs, video_codec::pyrowave))
+			if (not std::ranges::contains(info.supported_codecs, video_codec::pyrowave, &video_codec_capability::codec))
 				throw std::runtime_error("Headset does not support the pyrowave codec");
 			if (not video_encoder_pyrowave::supported(vk))
 				throw std::runtime_error("GPU does not support the pyrowave encoder");
@@ -236,7 +236,7 @@ public:
 		}
 
 		// The headset lists pyrowave first when it is selected in the headset settings
-		if (not config.codec and not info.supported_codecs.empty() and info.supported_codecs.front() == video_codec::pyrowave)
+		if (not config.codec and not info.supported_codecs.empty() and info.supported_codecs.front().codec == video_codec::pyrowave)
 		{
 			if (not video_encoder_pyrowave::supported(vk))
 				throw std::runtime_error("Headset requested the pyrowave codec, but the GPU does not support the pyrowave encoder");
@@ -245,9 +245,20 @@ public:
 
 		// pyrowave is not a hardware codec, only the pyrowave encoder handles it
 		std::vector<video_codec> hw_codecs;
-		for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
+		auto add_hw_codec = [&](video_codec codec) {
 			if (codec != video_codec::pyrowave and codec != video_codec::raw)
 				hw_codecs.push_back(codec);
+		};
+		if (config.codec)
+		{
+			add_hw_codec(*config.codec);
+		}
+		else
+		{
+			hw_codecs.reserve(info.supported_codecs.size());
+			for (const auto & capability: info.supported_codecs)
+				add_hw_codec(capability.codec);
+		}
 
 #if WIVRN_USE_VULKAN_ENCODE
 		if (config.name.empty() or config.name == encoder_vulkan)
@@ -282,7 +293,7 @@ public:
 		}
 #endif
 		U_LOG_W("No suitable hardware accelerated codec found");
-		if (config.name.empty() and not config.codec and std::ranges::contains(info.supported_codecs, video_codec::pyrowave) and video_encoder_pyrowave::supported(vk))
+		if (config.name.empty() and not config.codec and std::ranges::contains(info.supported_codecs, video_codec::pyrowave, &video_codec_capability::codec) and video_encoder_pyrowave::supported(vk))
 			return {encoder_pyrowave, video_codec::pyrowave};
 #if WIVRN_USE_X264
 		if (config.name.empty() or config.name == encoder_x264)
@@ -337,11 +348,20 @@ std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, 
 	if (bit_depth and bit_depth != 8 and bit_depth != 10)
 		throw std::runtime_error("invalid bit-depth setting. supported values: 8, 10");
 
-	if (std::ranges::contains(res, video_codec::h264, &encoder_settings::codec) or
-	    std::ranges::contains(res, video_codec::raw, &encoder_settings::codec))
+	const bool all_encoders_10bit = std::ranges::all_of(res, [&](const encoder_settings & encoder) {
+		auto it = std::ranges::find(info.supported_codecs, encoder.codec, &video_codec_capability::codec);
+		return it != info.supported_codecs.end() and it->supports_10bit;
+	});
+
+	if (bit_depth == 10 and not all_encoders_10bit)
+	{
+		U_LOG_I("Using 8-bit encoding due to mixed encoder support.");
 		bit_depth = 8;
+	}
 	else if (not bit_depth)
-		bit_depth = 10;
+	{
+		bit_depth = all_encoders_10bit ? 10 : 8;
+	}
 
 	auto check_format = [&](vk::Format format) {
 		try

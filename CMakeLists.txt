@@ -50,6 +50,14 @@ option(WIVRN_OPTIMIZE_SHADERS "Run spirv-opt on compiled shaders" ON)
 option(WIVRN_DEBUG_SHADERS "Compile shaders with debug information" OFF)
 option(WIVRN_ADDRESS_SANITIZER "Use address sanitizer" OFF)
 
+# V4L2 decoder on by default on Linux AArch64
+set(_WIVRN_USE_V4L2_DEFAULT OFF)
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" AND NOT ANDROID)
+    set(_WIVRN_USE_V4L2_DEFAULT ON)
+endif()
+option(WIVRN_USE_V4L2 "Enable V4L2 hardware video decoder" ${_WIVRN_USE_V4L2_DEFAULT})
+unset(_WIVRN_USE_V4L2_DEFAULT)
+
 if(WIVRN_OPTIMIZE_SHADERS AND WIVRN_DEBUG_SHADERS)
     message(FATAL_ERROR "WIVRN_OPTIMIZE_SHADERS and WIVRN_DEBUG_SHADERS are incompatible")
 endif()
@@ -140,10 +148,6 @@ if (WIVRN_BUILD_SERVER)
         pkg_check_modules(X264 REQUIRED IMPORTED_TARGET x264)
     endif()
 
-    if (WIVRN_USE_PIPEWIRE)
-        pkg_check_modules(libpipewire REQUIRED IMPORTED_TARGET libpipewire-0.3)
-    endif()
-
     pkg_check_modules(AVAHI REQUIRED IMPORTED_TARGET avahi-client avahi-glib)
     find_package(Eigen3 REQUIRED)
     find_package(nlohmann_json REQUIRED)
@@ -182,6 +186,10 @@ if (WIVRN_BUILD_CLIENT OR WIVRN_BUILD_DASHBOARD)
     find_package(Gettext REQUIRED)
 endif()
 
+if (WIVRN_USE_PIPEWIRE AND (WIVRN_BUILD_SERVER OR (WIVRN_BUILD_CLIENT AND NOT ANDROID)))
+    pkg_check_modules(libpipewire REQUIRED IMPORTED_TARGET libpipewire-0.3)
+endif()
+
 if (WIVRN_BUILD_CLIENT)
     find_program(RSVG_CONVERT rsvg-convert REQUIRED)
     find_program(KTX ktx REQUIRED)
@@ -196,11 +204,13 @@ if (WIVRN_BUILD_CLIENT)
 endif()
 
 if (WIVRN_BUILD_CLIENT AND NOT ANDROID)
-    pkg_check_modules(LIBAV_CLIENT REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+    if(NOT WIVRN_USE_V4L2)
+        pkg_check_modules(LIBAV_CLIENT REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+    endif()
     find_package(Fontconfig REQUIRED)
 
     if (WIVRN_USE_SYSTEM_OPENXR)
-        find_package(OpenXR 1.1.58 REQUIRED)
+        find_package(OpenXR 1.1.59 REQUIRED)
     endif()
 
     if (WIVRN_USE_SYSTEM_LIBKTX)
@@ -242,8 +252,8 @@ FetchContent_Declare(fastgltf      EXCLUDE_FROM_ALL SYSTEM URL https://github.co
                                    URL_HASH SHA256=0bb564e127b14c22f062db50f89381dd2e0a20dbaf4987ca138a4ae8728712f9)
 FetchContent_Declare(glm           EXCLUDE_FROM_ALL SYSTEM URL https://github.com/g-truc/glm/releases/download/1.0.2/glm-1.0.2.zip
                                    URL_HASH SHA256=77fff075c5ab0caf076fade41558c5458d9a242aba2b2076bb72008bdb51a35e)
-FetchContent_Declare(openxr_loader EXCLUDE_FROM_ALL SYSTEM URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.58.tar.gz
-                                   URL_HASH SHA256=815b933219c398314366c289221526428418d799205a73a9640c97ca4242602b)
+FetchContent_Declare(openxr_loader EXCLUDE_FROM_ALL SYSTEM URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.59.tar.gz
+                                   URL_HASH SHA256=d45d12d71cbe381a6fc510ec95ec84a88fe30724674e63bb038dfc9a481d8885)
 FetchContent_Declare(spdlog        EXCLUDE_FROM_ALL SYSTEM URL https://github.com/gabime/spdlog/archive/refs/tags/v1.16.0.tar.gz
                                    URL_HASH SHA256=8741753e488a78dd0d0024c980e1fb5b5c85888447e309d9cb9d949bdb52aa3e)
 FetchContent_Declare(stb           EXCLUDE_FROM_ALL SYSTEM URL https://github.com/nothings/stb/archive/013ac3beddff3dbffafd5177e7972067cd2b5083.zip
@@ -294,6 +304,7 @@ add_custom_target(wivrn-version ALL
         -P ${CMAKE_SOURCE_DIR}/cmake/GitVersion.cmake
         BYPRODUCTS ${CMAKE_BINARY_DIR}/version.cpp ${CMAKE_BINARY_DIR}/u_git_tag.cpp
         SOURCES common/version.cpp.in server/u_git_tag.cpp.in
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
 
 add_subdirectory(external)

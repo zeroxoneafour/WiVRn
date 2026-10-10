@@ -250,7 +250,7 @@ void video_encoder::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo info
 	// Wait for encoder to be done
 	present_slot = (present_slot + 1) % num_slots;
 	state[present_slot].wait(busy);
-	if (idr->should_skip(frame_index))
+	if (idr->should_skip(frame_index, stream_idx))
 	{
 		state[present_slot] = skip;
 		return;
@@ -335,7 +335,12 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		if (next == end)
 		{
 			if (end_of_frame)
-				shard.timing_info = timing_info;
+			{
+				if (serialized_size(timing_info) + std::distance(begin, next) <= max_payload_size)
+					shard.timing_info = timing_info;
+				else
+					--next;
+			}
 		}
 		shard.payload = {begin, next};
 		try

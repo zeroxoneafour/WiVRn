@@ -20,6 +20,8 @@
 
 #include "wivrn_packets.h"
 
+#include "wivrn_config.h"
+
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -46,6 +48,11 @@ public:
 		vk::ImageLayout & current_layout;
 		vk::Semaphore semaphore = nullptr;
 		uint64_t * semaphore_val = nullptr;
+#if WIVRN_USE_V4L2
+		// DMA-buf images from V4L2 require queue-family ownership
+		// transfers between Vulkan and external engine
+		uint32_t foreign_queue_family = vk::QueueFamilyIgnored;
+#endif
 	};
 
 public:
@@ -66,6 +73,7 @@ public:
 
 	virtual vk::Sampler sampler() = 0;
 
-	static const std::vector<wivrn::video_codec> & supported_codecs();
+	static const std::vector<wivrn::video_codec_capability> & supported_codecs();
+	static bool supports_10bit(wivrn::video_codec codec);
 };
 } // namespace wivrn

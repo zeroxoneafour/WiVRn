@@ -370,7 +370,6 @@ void wivrn_session::start(ipc_server * server)
 	assert(not net_thread.joinable());
 	mnd_ipc_server = server;
 	net_thread = std::jthread([this](auto stop_token) { return run_net(stop_token); });
-	resume_session();
 }
 
 void wivrn_session::stop()
@@ -469,7 +468,7 @@ void wivrn_session::resume_session()
 
 	worker_thread = std::jthread([this](std::stop_token stop) { return run_worker(stop); });
 	update_client_states(true, true);
-	hmd.update_presence(false, os_monotonic_get_ns());
+	hmd.update_presence(true, os_monotonic_get_ns());
 }
 
 clock_offset wivrn_session::get_offset()
@@ -574,6 +573,8 @@ static xrt_device_name get_name(interaction_profile profile)
 			return XRT_DEVICE_SAMSUNG_ODYSSEY_CONTROLLER;
 		case interaction_profile::valve_index_controller:
 			return XRT_DEVICE_INDEX_CONTROLLER;
+		case interaction_profile::valve_frame_controller_valve:
+			return XRT_DEVICE_FRAME_CONTROLLER;
 	}
 	throw std::runtime_error("invalid interaction profile id " + std::to_string(int(profile)));
 }
@@ -1057,6 +1058,7 @@ struct refresh_rate_adjuster
 
 void wivrn_session::run_net(std::stop_token stop)
 {
+	resume_session();
 	while (not stop.stop_requested())
 	{
 		try
@@ -1230,14 +1232,6 @@ std::pair<bool, std::optional<std::string>> wivrn_session::validate_headset_info
 		// only allow connecting from the "same" headset
 		refuse |= prev_info.system_name != info.system_name;
 
-		for (uint32_t i = 0; i < 2; i++)
-		{
-			refuse |= prev_info.fov[i].angleDown != info.fov[i].angleDown;
-			refuse |= prev_info.fov[i].angleUp != info.fov[i].angleUp;
-			refuse |= prev_info.fov[i].angleRight != info.fov[i].angleRight;
-			refuse |= prev_info.fov[i].angleLeft != info.fov[i].angleLeft;
-		}
-
 		refuse |= prev_info.palm_pose != info.palm_pose;
 		refuse |= prev_info.user_presence != info.user_presence;
 		refuse |= prev_info.passthrough != info.passthrough;
@@ -1329,8 +1323,7 @@ void wivrn_session::stop_application(std::optional<uint32_t> id, int64_t timeout
 	scoped_lock lock(mnd_ipc_server->global_state.lock);
 	for (auto & t: mnd_ipc_server->threads)
 	{
-		// Monado doesn't set state to IPC_THREAD_RUNNING
-		if (t.state != IPC_THREAD_STARTING)
+		if (t.state == IPC_THREAD_READY || t.state == IPC_THREAD_STOPPING)
 			continue;
 
 		uint32_t client_id = t.ics.client_state.id;

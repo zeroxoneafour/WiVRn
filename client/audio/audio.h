@@ -19,11 +19,19 @@
 
 #pragma once
 
+#include "wivrn_config.h"
+
 #ifdef __ANDROID__
 #include "android/audio.h"
 namespace wivrn
 {
 using audio = ::wivrn::android::audio;
+}
+#elif WIVRN_USE_PIPEWIRE
+#include "linux/audio.h"
+namespace wivrn
+{
+using audio = ::wivrn::linux_audio::audio;
 }
 #else
 

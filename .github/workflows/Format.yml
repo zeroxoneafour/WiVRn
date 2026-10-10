@@ -17,9 +17,9 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: Run clang-format style check for C/C++/Protobuf programs.
-      uses: jidicula/clang-format-action@v4.16.0
+      uses: jidicula/clang-format-action@v4.18.0
       with:
-        clang-format-version: '21'
+        clang-format-version: '22'
         check-path: ${{ matrix.path }}
 
   python-format-check:
@@ -30,12 +30,12 @@ jobs:
     - uses: actions/checkout@v6
     # Scope set by `include` in ruff.toml.
     - name: Run ruff lint check
-      uses: astral-sh/ruff-action@v3
+      uses: astral-sh/ruff-action@v4.1.0
       with:
         version: "0.16.0"
         args: "check"
     - name: Run ruff format check
-      uses: astral-sh/ruff-action@v3
+      uses: astral-sh/ruff-action@v4.1.0
       with:
         version: "0.16.0"
         args: "format --check"

@@ -18,6 +18,7 @@
  */
 
 #include "application.h"
+#include "battery.h"
 #include "stream.h"
 #include "utils/overloaded.h"
 #include "wivrn_packets.h"
@@ -30,10 +31,6 @@
 #include <ranges>
 #include <spdlog/spdlog.h>
 #include <thread>
-
-#ifdef __ANDROID__
-#include "android/battery.h"
-#endif
 
 namespace
 {
@@ -160,14 +157,14 @@ public:
 
 static std::optional<std::array<from_headset::hand_tracking::pose, XR_HAND_JOINT_COUNT_EXT>> locate_hands(xr::hand_tracker & hand, XrSpace space, XrTime time)
 {
-	auto joints = hand.locate(space, time);
+	auto located = hand.locate(space, time);
 
-	if (joints)
+	if (located and located->is_input_source())
 	{
 		std::array<from_headset::hand_tracking::pose, XR_HAND_JOINT_COUNT_EXT> poses;
 		for (int i = 0; i < XR_HAND_JOINT_COUNT_EXT; i++)
 		{
-			const auto & joint = (*joints)[i];
+			const auto & joint = located->joints[i];
 			poses[i] = {
 			        .position = joint.first.pose.position,
 			        .orientation = pack(joint.first.pose.orientation),
@@ -233,10 +230,10 @@ void scenes::stream::tracking()
 #ifdef __ANDROID__
 	// Runtime may use JNI and needs the thread to be attached
 	application::instance().setup_jni();
+#endif
 
 	XrTime next_battery_check = 0;
 	const XrDuration battery_check_interval = 30'000'000'000; // 30s
-#endif
 
 	magic_enum::containers::array<device_id, XrSpace> spaces{};
 
@@ -271,7 +268,17 @@ void scenes::stream::tracking()
 	}
 
 	XrSpace view_space = application::space(xr::spaces::view);
-	XrSpace world_space = application::space(xr::spaces::world);
+
+	// poses sent to the PC are located against this space instead of xr::spaces::world
+	// directly, so the configured player height offset applies uniformly to the head, hands
+	// and body. It shares xr::spaces::world's STAGE origin, translated by -offset: locating a
+	// pose in it therefore reports that pose offset up by +offset, i.e. increases perceived
+	// height.
+	auto make_height_offset_space = [&](float offset) {
+		return session.create_reference_space(XR_REFERENCE_SPACE_TYPE_STAGE, {{0, 0, 0, 1}, {0, -offset, 0}});
+	};
+	float applied_height_offset = config.get_height_offset();
+	xr::space height_offset_space = make_height_offset_space(applied_height_offset);
 
 	XrTime t0 = instance.now();
 	from_headset::tracking tracking;
@@ -291,7 +298,7 @@ void scenes::stream::tracking()
 	const bool body_tracking = config.check_feature(feature::body_tracking);
 	xr::body_tracker body_tracker;
 
-	locate_spaces_functor locate_spaces{instance, world_space};
+	locate_spaces_functor locate_spaces{instance, height_offset_space};
 
 	on_interaction_profile_changed({});
 
@@ -305,6 +312,13 @@ void scenes::stream::tracking()
 	{
 		try
 		{
+			if (float offset = config.get_height_offset(); offset != applied_height_offset)
+			{
+				applied_height_offset = offset;
+				height_offset_space = make_height_offset_space(applied_height_offset);
+				locate_spaces = locate_spaces_functor{instance, height_offset_space};
+			}
+
 			if (pattern_position == pattern.size())
 			{
 				// Upper limit to 200FPS
@@ -457,8 +471,8 @@ void scenes::stream::tracking()
 							else
 							{
 								// Pico headsets fail to locate gaze relative to view
-								auto gaze = locate_space(item.device, spaces[item.device], world_space, tracking.timestamp);
-								auto view_pose = locate_space(item.device, view_space, world_space, tracking.timestamp);
+								auto gaze = locate_space(item.device, spaces[item.device], height_offset_space, tracking.timestamp);
+								auto view_pose = locate_space(item.device, view_space, height_offset_space, tracking.timestamp);
 								glm::quat gaze_quat(gaze.pose.orientation.w, gaze.pose.orientation.x, gaze.pose.orientation.y, gaze.pose.orientation.z);
 								glm::quat view_quat(view_pose.pose.orientation.w, view_pose.pose.orientation.x, view_pose.pose.orientation.y, view_pose.pose.orientation.z);
 								gaze_quat = glm::conjugate(view_quat) * gaze_quat;
@@ -495,7 +509,7 @@ void scenes::stream::tracking()
 								        t0,
 								        at_time,
 								        from_headset::hand_tracking::left,
-								        locate_hands(*left_hand, world_space, tracking.timestamp));
+								        locate_hands(*left_hand, height_offset_space, tracking.timestamp));
 							}
 							break;
 						case wivrn::device_id::RIGHT_HAND:
@@ -505,14 +519,14 @@ void scenes::stream::tracking()
 								        t0,
 								        at_time,
 								        from_headset::hand_tracking::right,
-								        locate_hands(*right_hand, world_space, tracking.timestamp));
+								        locate_hands(*right_hand, height_offset_space, tracking.timestamp));
 							}
 							break;
 						case wivrn::device_id::BODY:
 							std::visit(utils::overloaded{
 							                   [](std::monostate &) {},
 							                   [&](auto & b) {
-								                   auto packet = b.locate_spaces(at_time, world_space);
+								                   auto packet = b.locate_spaces(at_time, height_offset_space);
 								                   packet.timestamp = at_time;
 								                   packet.production_timestamp = tracking.production_timestamp;
 								                   body.push_back(packet);
@@ -533,7 +547,6 @@ void scenes::stream::tracking()
 					throw;
 			}
 
-#ifdef __ANDROID__
 			// FIXME: switch to event based
 			if (next_battery_check < now)
 			{
@@ -546,7 +559,6 @@ void scenes::stream::tracking()
 
 				next_battery_check = now + battery_check_interval;
 			}
-#endif
 
 			if (auto fb = std::get_if<xr::fb_body_tracker>(&body_tracker); fb and fb->should_send_skeleton())
 			{
@@ -676,6 +688,7 @@ void scenes::stream::on_interaction_profile_changed(const XrEventDataInteraction
 			DO_PROFILE(yvr, touch_controller_yvr)
 			DO_PROFILE(samsung, odyssey_controller)
 			DO_PROFILE(valve, index_controller)
+			DO_PROFILE(valve, frame_controller_valve)
 
 			// FIXME: remove once support for pre-1.1 profiles is dropped
 			if (profile == "/interaction_profiles/facebook/touch_controller_pro")

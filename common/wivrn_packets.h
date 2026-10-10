@@ -61,13 +61,19 @@ enum class device_id : uint8_t
 	RIGHT_GRIP,                   // /user/hand/right/input/grip/pose
 	RIGHT_AIM,                    // /user/hand/right/input/aim/pose
 	RIGHT_PALM,                   // /user/hand/right/palm_ext/pose
-	X_CLICK,                      // /user/hand/left/input/x/click
-	X_TOUCH,                      // /user/hand/left/input/x/touch
-	Y_CLICK,                      // /user/hand/left/input/y/click
-	Y_TOUCH,                      // /user/hand/left/input/y/touch
-	MENU_CLICK,                   // /user/hand/left/input/menu/click
+	LEFT_X_CLICK,                 // /user/hand/left/input/x/click
+	LEFT_X_TOUCH,                 // /user/hand/left/input/x/touch
+	LEFT_Y_CLICK,                 // /user/hand/left/input/y/click
+	LEFT_Y_TOUCH,                 // /user/hand/left/input/y/touch
+	VIEW_CLICK,                   // /user/hand/left/input/view/click
+	VIEW_TOUCH,                   // /user/hand/left/input/view/touch
+	LEFT_MENU_CLICK,              // /user/hand/left/input/{menu,system}/click
+	LEFT_SYSTEM_TOUCH,            // /user/hand/left/input/system/touch
+	LEFT_BUMPER_CLICK,            // /user/hand/left/input/bumper/click
+	LEFT_BUMPER_TOUCH,            // /user/hand/left/input/bumper/touch
 	LEFT_SQUEEZE_CLICK,           // /user/hand/left/input/squeeze/click
 	LEFT_SQUEEZE_FORCE,           // /user/hand/left/input/squeeze/force
+	LEFT_SQUEEZE_TOUCH,           // /user/hand/left/input/squeeze/touch
 	LEFT_SQUEEZE_VALUE,           // /user/hand/left/input/squeeze/value
 	LEFT_TRIGGER_CLICK,           // /user/hand/left/input/trigger/click
 	LEFT_TRIGGER_VALUE,           // /user/hand/left/input/trigger/value
@@ -97,13 +103,27 @@ enum class device_id : uint8_t
 	LEFT_AIM_ACTIVATE_READY,      // /user/hand/left/input/aim_activate_ext/ready_ext
 	LEFT_GRASP_VALUE,             // /user/hand/left/input/grasp_ext/value
 	LEFT_GRASP_READY,             // /user/hand/left/input/grasp_ext/ready_ext
+	DPAD_UP_CLICK,                // /user/hand/left/input/dpad_up/click
+	DPAD_UP_TOUCH,                // /user/hand/left/input/dpad_up/touch
+	DPAD_LEFT_CLICK,              // /user/hand/left/input/dpad_left/click
+	DPAD_LEFT_TOUCH,              // /user/hand/left/input/dpad_left/touch
 	A_CLICK,                      // /user/hand/right/input/a/click
 	A_TOUCH,                      // /user/hand/right/input/a/touch
 	B_CLICK,                      // /user/hand/right/input/b/click
 	B_TOUCH,                      // /user/hand/right/input/b/touch
-	SYSTEM_CLICK,                 // /user/hand/right/input/system/click
+	RIGHT_X_CLICK,                // /user/hand/right/input/x/click
+	RIGHT_X_TOUCH,                // /user/hand/right/input/x/touch
+	RIGHT_Y_CLICK,                // /user/hand/right/input/y/click
+	RIGHT_Y_TOUCH,                // /user/hand/right/input/y/touch
+	RIGHT_SYSTEM_CLICK,           // /user/hand/right/input/system/click
+	RIGHT_SYSTEM_TOUCH,           // /user/hand/right/input/system/touch
+	RIGHT_MENU_CLICK,             // /user/hand/right/input/menu/click
+	RIGHT_MENU_TOUCH,             // /user/hand/right/input/menu/touch
+	RIGHT_BUMPER_CLICK,           // /user/hand/right/input/bumper/click
+	RIGHT_BUMPER_TOUCH,           // /user/hand/right/input/bumper/touch
 	RIGHT_SQUEEZE_CLICK,          // /user/hand/right/input/squeeze/click
 	RIGHT_SQUEEZE_FORCE,          // /user/hand/right/input/squeeze/force
+	RIGHT_SQUEEZE_TOUCH,          // /user/hand/right/input/squeeze/touch
 	RIGHT_SQUEEZE_VALUE,          // /user/hand/right/input/squeeze/value
 	RIGHT_TRIGGER_CLICK,          // /user/hand/right/input/trigger/click
 	RIGHT_TRIGGER_VALUE,          // /user/hand/right/input/trigger/value
@@ -190,6 +210,7 @@ enum class interaction_profile : uint8_t
 	yvr_touch_controller_yvr,
 	samsung_odyssey_controller,
 	valve_index_controller,
+	valve_frame_controller_valve,
 };
 
 enum video_codec
@@ -200,6 +221,14 @@ enum video_codec
 	av1,
 	raw,
 	pyrowave,
+};
+
+struct video_codec_capability
+{
+	video_codec codec;
+	bool supports_10bit;
+
+	bool operator==(const video_codec_capability &) const = default;
 };
 
 enum class stream_tab : uint8_t
@@ -318,7 +347,6 @@ struct headset_info_packet
 	};
 	std::optional<audio_description> speaker;
 	std::optional<audio_description> microphone;
-	std::array<XrFovf, 2> fov;
 	bool hand_tracking;
 	bool eye_gaze;
 	bool palm_pose;
@@ -328,8 +356,8 @@ struct headset_info_packet
 	body_type body_tracking;
 	// htc body only
 	uint32_t num_generic_trackers;
-	std::vector<video_codec> supported_codecs; // from preferred to least preferred
-	std::optional<uint8_t> bit_depth;
+	std::vector<video_codec_capability> supported_codecs; // from preferred to least preferred
+	std::optional<uint8_t> bit_depth;                     // explicit preference
 	std::string system_name;
 
 	// Used for the application list

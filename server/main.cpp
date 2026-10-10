@@ -26,7 +26,6 @@
  */
 
 #include "application.h"
-#include "openxr/openxr.h"
 #include "sleep_inhibitor.h"
 #include "util/u_trace_marker.h"
 
@@ -807,15 +806,6 @@ void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & inf
 	wivrn_server_set_mic_channels(dbus_server, mic.num_channels);
 	wivrn_server_set_mic_sample_rate(dbus_server, mic.sample_rate);
 
-	builder = g_variant_builder_new(G_VARIANT_TYPE("a(dddd)"));
-	for (XrFovf fov: info.fov)
-	{
-		g_variant_builder_add(builder, "(dddd)", fov.angleLeft, fov.angleRight, fov.angleUp, fov.angleDown);
-	}
-	GVariant * value_field_of_view = g_variant_new("a(dddd)", builder);
-	g_variant_builder_unref(builder);
-	wivrn_server_set_field_of_view(dbus_server, value_field_of_view);
-
 	wivrn_server_set_hand_tracking(dbus_server, info.hand_tracking);
 	wivrn_server_set_eye_gaze(dbus_server, info.eye_gaze);
 	wivrn_server_set_face_tracking(dbus_server, info.face_tracking != wivrn::from_headset::face_type::none);
@@ -825,9 +815,9 @@ void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & inf
 	        {h264, "h264"},
 	        {h265, "h265"},
 	        {av1, "av1"}};
-	for (video_codec codec: info.supported_codecs)
+	for (const auto & capability: info.supported_codecs)
 	{
-		auto it = codec_names.find(codec);
+		auto it = codec_names.find(capability.codec);
 		if (it != codec_names.end())
 			codecs.push_back(it->second);
 	}
