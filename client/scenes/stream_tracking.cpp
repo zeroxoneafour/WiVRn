@@ -26,6 +26,7 @@
 #include "xr/face_tracker.h"
 #include "xr/fb_body_tracker.h"
 #include "xr/to_string.h"
+#include <glm/gtc/quaternion.hpp>
 #include <magic_enum.hpp>
 #include <magic_enum_containers.hpp>
 #include <ranges>
@@ -58,6 +59,37 @@ from_headset::tracking::pose locate_space(device_id device, XrSpace space, XrSpa
 		};
 	spdlog::warn("xrLocateSpace failed for {}: {}", magic_enum::enum_name(device), xr::to_string(res));
 	return {.device = device};
+}
+
+from_headset::tracking::pose make_eye_gaze_view_relative(
+        const from_headset::tracking::pose & gaze_pose,
+        const from_headset::tracking::pose & view_pose)
+{
+	glm::quat gaze_quat(
+	        gaze_pose.pose.orientation.w,
+	        gaze_pose.pose.orientation.x,
+	        gaze_pose.pose.orientation.y,
+	        gaze_pose.pose.orientation.z);
+	const glm::quat view_quat(
+	        view_pose.pose.orientation.w,
+	        view_pose.pose.orientation.x,
+	        view_pose.pose.orientation.y,
+	        view_pose.pose.orientation.z);
+	gaze_quat = glm::conjugate(view_quat) * gaze_quat;
+
+	using flags = from_headset::pose_flags;
+	return {
+	        .pose = {
+	                .orientation = {
+	                        .x = gaze_quat.x,
+	                        .y = gaze_quat.y,
+	                        .z = gaze_quat.z,
+	                        .w = gaze_quat.w,
+	                },
+	        },
+	        .device = gaze_pose.device,
+	        .flags = uint8_t(gaze_pose.flags & view_pose.flags & ~(flags::linear_velocity_valid | flags::angular_velocity_valid)),
+	};
 }
 
 class locate_spaces_functor
@@ -155,16 +187,33 @@ public:
 
 } // namespace
 
-static std::optional<std::array<from_headset::hand_tracking::pose, XR_HAND_JOINT_COUNT_EXT>> locate_hands(xr::hand_tracker & hand, XrSpace space, XrTime time)
+static from_headset::hand_tracking locate_hands(
+        xr::hand_tracker & tracker,
+        XrSpace space,
+        XrTime now,
+        XrTime time)
 {
-	auto located = hand.locate(space, time);
+	using hand_id = from_headset::hand_tracking::hand_id;
+	auto located = tracker.locate(space, time);
 
-	if (located and located->is_input_source())
+	from_headset::hand_tracking res{
+	        .production_timestamp = now,
+	        .timestamp = time,
+	        .hand = tracker.hand() == XR_HAND_LEFT_EXT ? hand_id::left : hand_id::right,
+	};
+
+	if (located.data_source == XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT)
+		res.hand = tracker.hand() == XR_HAND_LEFT_EXT
+		                   ? hand_id::left_controller
+		                   : hand_id::right_controller;
+
+	if (located.joints)
 	{
-		std::array<from_headset::hand_tracking::pose, XR_HAND_JOINT_COUNT_EXT> poses;
+		const auto & joints = *located.joints;
+		auto & poses = res.joints.emplace();
 		for (int i = 0; i < XR_HAND_JOINT_COUNT_EXT; i++)
 		{
-			const auto & joint = located->joints[i];
+			const auto & joint = joints[i];
 			poses[i] = {
 			        .position = joint.first.pose.position,
 			        .orientation = pack(joint.first.pose.orientation),
@@ -174,11 +223,9 @@ static std::optional<std::array<from_headset::hand_tracking::pose, XR_HAND_JOINT
 			        .flags = from_headset::to_pose_flags(joint.first.locationFlags, joint.second.velocityFlags),
 			};
 		}
-
-		return poses;
 	}
-	else
-		return std::nullopt;
+
+	return res;
 }
 
 template <typename T>
@@ -238,6 +285,7 @@ void scenes::stream::tracking()
 	magic_enum::containers::array<device_id, XrSpace> spaces{};
 
 	const auto & config = application::get_config();
+	const bool eye_gaze_enabled = config.check_feature(feature::eye_gaze);
 
 	{
 		std::vector ids{
@@ -255,7 +303,7 @@ void scenes::stream::tracking()
 			ids.insert(ids.end(), {device_id::LEFT_PINCH_POSE, device_id::LEFT_POKE, device_id::RIGHT_PINCH_POSE, device_id::RIGHT_POKE});
 		}
 
-		if (config.check_feature(feature::eye_gaze))
+		if (eye_gaze_enabled)
 			ids.emplace_back(device_id::EYE_GAZE);
 
 		for (auto id: ids)
@@ -279,8 +327,18 @@ void scenes::stream::tracking()
 	};
 	float applied_height_offset = config.get_height_offset();
 	xr::space height_offset_space = make_height_offset_space(applied_height_offset);
+	XrSpace world_space = application::space(xr::spaces::world);
+	auto locate_eye_gaze = [&](XrTime time) {
+		// Eye gaze uses view pose as the origin.
+		if (application::get_hmd_traits().view_locate)
+			return locate_space(device_id::EYE_GAZE, spaces[device_id::EYE_GAZE], view_space, time);
 
-	XrTime t0 = instance.now();
+		// Pico headsets fail to locate gaze relative to view.
+		return make_eye_gaze_view_relative(
+		        locate_space(device_id::EYE_GAZE, spaces[device_id::EYE_GAZE], world_space, time),
+		        locate_space(device_id::EYE_GAZE, view_space, world_space, time));
+	};
+
 	from_headset::tracking tracking;
 	std::vector<from_headset::hand_tracking> hands;
 	std::vector<std::variant<from_headset::meta_body, from_headset::bd_body, from_headset::htc_body>> body;
@@ -342,10 +400,14 @@ void scenes::stream::tracking()
 
 					if (hand_tracking)
 					{
+						std::array data_sources = {
+						        XR_HAND_TRACKING_DATA_SOURCE_UNOBSTRUCTED_EXT,
+						        XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT,
+						};
 						if (std::ranges::contains(pattern, device_id::LEFT_HAND, &to_headset::tracking_control::sample::device))
 						{
 							if (not left_hand)
-								left_hand = session.create_hand_tracker(XR_HAND_LEFT_EXT);
+								left_hand = session.create_hand_tracker(XR_HAND_LEFT_EXT, data_sources);
 						}
 						else
 							left_hand.reset();
@@ -353,7 +415,7 @@ void scenes::stream::tracking()
 						if (std::ranges::contains(pattern, device_id::RIGHT_HAND, &to_headset::tracking_control::sample::device))
 						{
 							if (not right_hand)
-								right_hand = session.create_hand_tracker(XR_HAND_RIGHT_EXT);
+								right_hand = session.create_hand_tracker(XR_HAND_RIGHT_EXT, data_sources);
 						}
 						else
 							right_hand.reset();
@@ -412,11 +474,19 @@ void scenes::stream::tracking()
 				if (auto htc = std::get_if<xr::htc_body_tracker>(&body_tracker))
 					htc->update_active();
 
+			const bool emulating_gamepad = using_frame_gamepad();
 			tracking.interaction_profiles = {
 			        interaction_profiles[0].load(),
 			        interaction_profiles[1].load(),
 			        interaction_profiles[2].load(),
 			};
+			if (emulating_gamepad)
+			{
+				// The server must see only a gamepad, no VR controllers
+				tracking.interaction_profiles[0] = interaction_profile::none;
+				tracking.interaction_profiles[1] = interaction_profile::none;
+				tracking.interaction_profiles[2] = interaction_profile::microsoft_xbox_controller;
+			}
 
 			tracking.production_timestamp = t0;
 			tracking.timestamp = t0 + pattern[pattern_position].prediction_ns;
@@ -450,6 +520,7 @@ void scenes::stream::tracking()
 								j.pose = i.pose;
 								j.fov = i.fov;
 							}
+
 							locate_spaces.add_space(item.device, view_space, tracking.timestamp, tracking.device_poses);
 							break;
 						case wivrn::device_id::LEFT_GRIP:
@@ -462,36 +533,12 @@ void scenes::stream::tracking()
 						case wivrn::device_id::LEFT_POKE:
 						case wivrn::device_id::RIGHT_PINCH_POSE:
 						case wivrn::device_id::RIGHT_POKE:
-							locate_spaces.add_space(item.device, spaces[item.device], tracking.timestamp, tracking.device_poses);
+							if (not emulating_gamepad)
+								locate_spaces.add_space(item.device, spaces[item.device], tracking.timestamp, tracking.device_poses);
 							break;
 						case wivrn::device_id::EYE_GAZE:
-							// Eye gaze uses view pose as the origin
-							if (application::get_hmd_traits().view_locate)
-								tracking.device_poses.push_back(locate_space(item.device, spaces[item.device], spaces[wivrn::device_id::HEAD], tracking.timestamp));
-							else
-							{
-								// Pico headsets fail to locate gaze relative to view
-								auto gaze = locate_space(item.device, spaces[item.device], height_offset_space, tracking.timestamp);
-								auto view_pose = locate_space(item.device, view_space, height_offset_space, tracking.timestamp);
-								glm::quat gaze_quat(gaze.pose.orientation.w, gaze.pose.orientation.x, gaze.pose.orientation.y, gaze.pose.orientation.z);
-								glm::quat view_quat(view_pose.pose.orientation.w, view_pose.pose.orientation.x, view_pose.pose.orientation.y, view_pose.pose.orientation.z);
-								gaze_quat = glm::conjugate(view_quat) * gaze_quat;
-								using flags = from_headset::pose_flags;
-								tracking.device_poses.push_back(
-								        from_headset::tracking::pose{
-								                // Zero position and velocities
-								                .pose = {
-								                        .orientation = {
-								                                .x = gaze_quat.x,
-								                                .y = gaze_quat.y,
-								                                .z = gaze_quat.z,
-								                                .w = gaze_quat.w,
-								                        },
-								                },
-								                .device = item.device,
-								                .flags = uint8_t(gaze.flags & view_pose.flags & ~(flags::linear_velocity_valid | flags::angular_velocity_valid)),
-								        });
-							}
+							if (eye_gaze_enabled)
+								tracking.device_poses.push_back(locate_eye_gaze(tracking.timestamp));
 							break;
 						case wivrn::device_id::FACE:
 							std::visit(utils::overloaded{
@@ -505,21 +552,17 @@ void scenes::stream::tracking()
 						case wivrn::device_id::LEFT_HAND:
 							if (left_hand)
 							{
-								hands.emplace_back(
-								        t0,
-								        at_time,
-								        from_headset::hand_tracking::left,
-								        locate_hands(*left_hand, height_offset_space, tracking.timestamp));
+								auto hand = locate_hands(*left_hand, height_offset_space, t0, at_time);
+								if (not emulating_gamepad or hand.hand != from_headset::hand_tracking::hand_id::left_controller)
+									hands.emplace_back(std::move(hand));
 							}
 							break;
 						case wivrn::device_id::RIGHT_HAND:
 							if (right_hand)
 							{
-								hands.emplace_back(
-								        t0,
-								        at_time,
-								        from_headset::hand_tracking::right,
-								        locate_hands(*right_hand, height_offset_space, tracking.timestamp));
+								auto hand = locate_hands(*right_hand, height_offset_space, t0, at_time);
+								if (not emulating_gamepad or hand.hand != from_headset::hand_tracking::hand_id::right_controller)
+									hands.emplace_back(std::move(hand));
 							}
 							break;
 						case wivrn::device_id::BODY:
@@ -603,7 +646,7 @@ void scenes::stream::tracking()
 			network_session->send_stream(std::span(packets.data(), packet_count));
 
 			XrTime old = scheduled_derived_pose;
-			if (old and now > old)
+			if (old and now > old and not emulating_gamepad)
 			{
 				send_derived_pose();
 				scheduled_derived_pose.compare_exchange_strong(old, 0);

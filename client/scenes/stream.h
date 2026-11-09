@@ -24,6 +24,7 @@
 #include "audio/audio.h"
 #include "configuration.h"
 #include "decoder/shard_accumulator.h"
+#include "foveation.h"
 #include "render/imgui_impl.h"
 #include "scene.h"
 #include "scenes/input_profile.h"
@@ -80,6 +81,37 @@ private:
 	std::thread network_thread;
 	thread_safe<to_headset::tracking_control> tracking_control{};
 	std::array<std::atomic<interaction_profile>, 3> interaction_profiles; // left hand, right hand, gamepad
+	std::atomic<bool> gamepad_mode = false;
+
+	struct chord_state
+	{
+		XrAction a = XR_NULL_HANDLE;
+		XrAction b = XR_NULL_HANDLE;
+		uint32_t clicks_needed = 1;
+
+		bool both_released = false;
+		uint32_t clicks_done = 0;
+		XrTime first_click_time = 0;
+
+		void reset()
+		{
+			both_released = false;
+			clicks_done = 0;
+			first_click_time = 0;
+		}
+
+		// Read actions a and b and determine if they were activated together clicks_needed times in a row
+		bool check(XrTime now);
+	};
+	chord_state menu_chord = {};
+	chord_state gamepad_chord = {.clicks_needed = 2};
+
+	bool using_frame_gamepad() const
+	{
+		return gamepad_mode.load() and
+		       interaction_profiles[0].load() == interaction_profile::valve_frame_controller_valve and
+		       interaction_profiles[1].load() == interaction_profile::valve_frame_controller_valve;
+	}
 	std::atomic<bool> interaction_profile_changed = false;
 	std::atomic<XrTime> scheduled_derived_pose = 0; // Tracking thread will compute derived pose when time is reached
 	std::atomic<bool> recenter_requested = false;
@@ -119,6 +151,7 @@ private:
 		state_.compare_exchange_strong(prev, new_state);
 	}
 
+	client_foveation::center foveation_center;
 	xr::swapchain swapchain;
 
 	std::optional<audio> audio_handle;
@@ -171,8 +204,6 @@ private:
 
 	thread_safe<std::queue<std::string>> stream_error_queue;
 
-	XrAction plots_toggle_1 = XR_NULL_HANDLE;
-	XrAction plots_toggle_2 = XR_NULL_HANDLE;
 	XrAction recenter_left = XR_NULL_HANDLE;
 	XrAction recenter_right = XR_NULL_HANDLE;
 	XrAction gui_distance_left = XR_NULL_HANDLE;
@@ -189,10 +220,6 @@ private:
 	// Position of the GUI relative to the world space, in world space axes, used when the GUI is interactable
 	glm::vec3 world_gui_position;
 	glm::quat world_gui_orientation;
-
-	bool override_foveation_enable;
-	float override_foveation_pitch; // The pitch is the opposite as the height displayed in the GUI
-	float override_foveation_distance;
 
 	// Which controller is used for recentering and position of the GUI relative to the controller, in controller axes, during recentering
 	std::optional<std::tuple<xr::spaces, glm::vec3, glm::quat>> recentering_context;
@@ -279,7 +306,8 @@ private:
 	void send_derived_pose();
 
 	void setup(const to_headset::video_stream_description &);
-	void setup_reprojection_swapchain(uint32_t width, uint32_t height);
+	void setup_reprojection_swapchain(uint32_t width, uint32_t height, bool foveation);
+	void ensure_swapchain(bool cropped, uint32_t width, uint32_t height);
 
 	vk::raii::QueryPool query_pool = nullptr;
 	bool query_pool_filled = false;

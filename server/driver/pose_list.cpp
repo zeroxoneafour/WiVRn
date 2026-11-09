@@ -77,14 +77,13 @@ xrt_space_relation pose_list::extrapolate(const xrt_space_relation & a, const xr
 
 	float dt = (t - tb) / 1.e9;
 
-	float dt2_over_2 = dt * dt / 2;
 	res.pose.position = res.pose.position + lin_vel * dt;
 
 	if (res.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT)
 	{
 		xrt_vec3 dtheta = res.angular_velocity * dt;
 		xrt_quat dq;
-		math_quat_exp(&dtheta, &dq);
+		math_quat_exp_so3(&dtheta, &dq);
 
 		map_quat(res.pose.orientation) = map_quat(res.pose.orientation) * map_quat(dq);
 	}

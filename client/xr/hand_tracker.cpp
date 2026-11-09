@@ -26,29 +26,25 @@
 #include <cassert>
 #include <spdlog/spdlog.h>
 
-xr::hand_tracker::hand_tracker(instance & inst, session & session, const XrHandTrackerCreateInfoEXT & info) :
-        handle(inst.get_proc<PFN_xrDestroyHandTrackerEXT>("xrDestroyHandTrackerEXT"))
+xr::hand_tracker::hand_tracker(instance & inst, session & session, const XrHandTrackerCreateInfoEXT & info, std::span<XrHandTrackingDataSourceEXT> sources) :
+        handle(inst.get_proc<PFN_xrDestroyHandTrackerEXT>("xrDestroyHandTrackerEXT")),
+        hand_{info.hand}
 {
 	auto xrCreateHandTrackerEXT = inst.get_proc<PFN_xrCreateHandTrackerEXT>("xrCreateHandTrackerEXT");
 	assert(xrCreateHandTrackerEXT);
 	xrLocateHandJointsEXT = inst.get_proc<PFN_xrLocateHandJointsEXT>("xrLocateHandJointsEXT");
-	hand_tracking_data_source_supported = inst.has_extension(XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME);
+
 	if (inst.has_extension(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME))
 		xrGetHandMeshFB = inst.get_proc<PFN_xrGetHandMeshFB>("xrGetHandMeshFB");
 
-	if (hand_tracking_data_source_supported)
+	if (not sources.empty() and inst.has_extension(XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME))
 	{
-		// request both sources, callers of locate() decide how to use the results
-		std::array<XrHandTrackingDataSourceEXT, 2> data_sources = {
-		        XR_HAND_TRACKING_DATA_SOURCE_UNOBSTRUCTED_EXT,
-		        XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT,
-		};
-
+		use_data_source = true;
 		XrHandTrackingDataSourceInfoEXT data_source_info{
 		        .type = XR_TYPE_HAND_TRACKING_DATA_SOURCE_INFO_EXT,
 		        .next = info.next,
-		        .requestedDataSourceCount = static_cast<uint32_t>(data_sources.size()),
-		        .requestedDataSources = data_sources.data(),
+		        .requestedDataSourceCount = static_cast<uint32_t>(sources.size()),
+		        .requestedDataSources = sources.data(),
 		};
 
 		auto create_info = info;
@@ -61,10 +57,10 @@ xr::hand_tracker::hand_tracker(instance & inst, session & session, const XrHandT
 	}
 }
 
-std::optional<xr::hand_tracker::located_hand> xr::hand_tracker::locate(XrSpace space, XrTime time)
+xr::hand_tracker::located_hand xr::hand_tracker::locate(XrSpace space, XrTime time)
 {
 	if (!id || !xrLocateHandJointsEXT)
-		return std::nullopt;
+		return {};
 
 	XrHandJointsLocateInfoEXT info{
 	        .type = XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT,
@@ -102,34 +98,38 @@ std::optional<xr::hand_tracker::located_hand> xr::hand_tracker::locate(XrSpace s
 	        .jointCount = joints_pos.size(),
 	        .jointLocations = joints_pos.data(),
 	};
-	if (hand_tracking_data_source_supported)
+	if (use_data_source)
 		locations.next = &data_source_state;
 
 	CHECK_XR(xrLocateHandJointsEXT(id, &info, &locations));
 
-	if (!locations.isActive)
-		return std::nullopt;
+	located_hand res{};
 
-	if (hand_tracking_data_source_supported && !data_source_state.isActive)
-		// returned joints are not valid
-		return std::nullopt;
-
-	// bail if any of the joint is invalid
-	if (std::ranges::any_of(joints_pos, [](const auto & loc) { return loc.locationFlags == 0; }))
-		return std::nullopt;
-
-	joint_array joints;
-	for (int i = 0; i < XR_HAND_JOINT_COUNT_EXT; i++)
+	if (locations.isActive)
 	{
-		joints[i] = {joints_pos[i], joints_vel[i]};
+		res.joints.emplace();
+		auto & joints = *res.joints;
+		for (int i = 0; i < XR_HAND_JOINT_COUNT_EXT; i++)
+		{
+			if (joints_pos[i].locationFlags == 0)
+			{
+				// bail if any of the joint is invalid
+				res.joints.reset();
+				break;
+			}
+			joints[i] = {joints_pos[i], joints_vel[i]};
+		}
 	}
 
-	return located_hand{
-	        .joints = joints,
-	        .data_source = hand_tracking_data_source_supported
-	                               ? std::optional{data_source_state.dataSource}
-	                               : std::nullopt,
-	};
+	if (use_data_source)
+	{
+		res.data_source = data_source_state.dataSource;
+		if (not data_source_state.isActive)
+			// returned joints are not valid
+			res.joints.reset();
+	}
+
+	return res;
 }
 
 const xr::hand_tracker::mesh_data * xr::hand_tracker::mesh()

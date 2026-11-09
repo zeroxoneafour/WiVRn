@@ -560,7 +560,6 @@ void imgui_context::initialize_fonts()
 std::vector<imgui_context::controller_state> imgui_context::read_controllers_state(XrTime display_time)
 {
 	float scroll_scale = io.DeltaTime * constants::gui::scroll_ratio;
-	size_t new_focused_controller = focused_controller;
 
 	std::vector<controller_state> new_states;
 	new_states.resize(controllers.size());
@@ -581,10 +580,10 @@ std::vector<imgui_context::controller_state> imgui_context::read_controllers_sta
 		current_aim_interaction = 1;
 		if (ctrl.hand)
 		{
-			if (auto hand = ctrl.hand->locate(world, display_time); hand and hand->is_input_source())
+			if (auto hand = ctrl.hand->locate(world, display_time).joints)
 			{
-				XrHandJointLocationEXT & index_tip = hand->joints[XR_HAND_JOINT_INDEX_TIP_EXT].first;
-				XrHandJointLocationEXT & palm = hand->joints[XR_HAND_JOINT_PALM_EXT].first;
+				XrHandJointLocationEXT & index_tip = (*hand)[XR_HAND_JOINT_INDEX_TIP_EXT].first;
+				XrHandJointLocationEXT & palm = (*hand)[XR_HAND_JOINT_PALM_EXT].first;
 
 				if (index_tip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
 				{

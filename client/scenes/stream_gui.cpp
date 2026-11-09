@@ -363,8 +363,6 @@ void scenes::stream::gui_performance_metrics()
 
 void scenes::stream::gui_compact_view()
 {
-	const auto & metrics = global_metrics[(metrics_offset + global_metrics.size() - 1) % global_metrics.size()];
-
 	if (ImGui::BeginTable("metrics", 2))
 	{
 		auto f = [&](const char * label, float value, const char * unit) {
@@ -417,13 +415,10 @@ void scenes::stream::gui_settings(float)
 	        .enter_foveation_adjust = [this] { next_gui_status = stream_tab::foveation_settings; },
 	        .on_foveation_override_changed = [this] {
 		        const auto & config = application::get_config();
-		        override_foveation_enable = config.override_foveation_enable;
-		        override_foveation_pitch = config.override_foveation_pitch;
-		        override_foveation_distance = config.override_foveation_distance;
-		        network_session->send_control(from_headset::override_foveation_center{
-		                .enabled = override_foveation_enable,
-		                .pitch = override_foveation_pitch,
-		                .distance = override_foveation_distance,
+		        foveation_center.set_manual_mode({
+		                .enabled = config.override_foveation_enable,
+		                .pitch = config.override_foveation_pitch,
+		                .distance = config.override_foveation_distance,
 		        }); },
 	};
 
@@ -484,11 +479,13 @@ void scenes::stream::gui_bitrate_settings(float predicted_display_period)
 
 void scenes::stream::gui_foveation_settings(float predicted_display_period)
 {
+	auto override = foveation_center.get_manual_mode();
+
 	ImGui::PushFont(nullptr, constants::gui::font_size_large);
 	ImGui::Text("%s", _S("Use the thumbsticks to move the foveation center"));
 	ImGui::Text("%s", _S("Press A to save or B to cancel"));
-	ImGui::Text("%s", fmt::format(_F("Height {:.1f} °"), -override_foveation_pitch * 180 / M_PI).c_str());
-	ImGui::Text("%s", fmt::format(_F("Distance {:.2f} m"), override_foveation_distance).c_str());
+	ImGui::Text("%s", fmt::format(_F("Height {:.1f} °"), -override.pitch * 180 / M_PI).c_str());
+	ImGui::Text("%s", fmt::format(_F("Distance {:.2f} m"), override.distance).c_str());
 	ImGui::PopFont();
 
 	// Maximum speed 1 rad/s
@@ -497,8 +494,8 @@ void scenes::stream::gui_foveation_settings(float predicted_display_period)
 	// Maximum speed 2m/s @ 1m
 	float delta_distance = std::pow(constants::stream::gui_max_foveation_speed, application::read_action_float(foveation_distance).value_or(std::pair{0, 0}).second * predicted_display_period);
 
-	override_foveation_pitch = std::clamp<float>(override_foveation_pitch + delta_pitch, constants::stream::gui_min_foveation_pitch, constants::stream::gui_max_foveation_pitch);
-	override_foveation_distance = std::clamp<float>(override_foveation_distance * delta_distance, constants::stream::gui_min_foveation_distance, constants::stream::gui_max_foveation_distance);
+	override.pitch = std::clamp<float>(override.pitch + delta_pitch, constants::stream::gui_min_foveation_pitch, constants::stream::gui_max_foveation_pitch);
+	override.distance = std::clamp<float>(override.distance * delta_distance, constants::stream::gui_min_foveation_distance, constants::stream::gui_max_foveation_distance);
 
 	bool ok = application::read_action_bool(foveation_ok).value_or(std::pair{0, false}).second;
 	bool cancel = application::read_action_bool(foveation_cancel).value_or(std::pair{0, false}).second;
@@ -506,12 +503,13 @@ void scenes::stream::gui_foveation_settings(float predicted_display_period)
 	if (ok)
 	{
 		next_gui_status = stream_tab::settings;
+		override.enabled = true;
 
 		// Save settings
 		auto & config = application::get_config();
-		config.override_foveation_enable = true;
-		config.override_foveation_pitch = override_foveation_pitch;
-		config.override_foveation_distance = override_foveation_distance;
+		config.override_foveation_enable = override.enabled;
+		config.override_foveation_pitch = override.pitch;
+		config.override_foveation_distance = override.distance;
 		config.save();
 	}
 	else if (cancel)
@@ -520,16 +518,14 @@ void scenes::stream::gui_foveation_settings(float predicted_display_period)
 
 		// Restore settings
 		const auto & config = application::get_config();
-		override_foveation_enable = config.override_foveation_enable;
-		override_foveation_pitch = config.override_foveation_pitch;
-		override_foveation_distance = config.override_foveation_distance;
+		override = {
+		        .enabled = config.override_foveation_enable,
+		        .pitch = config.override_foveation_pitch,
+		        .distance = config.override_foveation_distance,
+		};
 	}
 
-	network_session->send_control(from_headset::override_foveation_center{
-	        .enabled = override_foveation_enable,
-	        .pitch = override_foveation_pitch,
-	        .distance = override_foveation_distance,
-	});
+	foveation_center.set_manual_mode(override);
 }
 
 void scenes::stream::gui_applications()
@@ -729,10 +725,13 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 		glm::mat3 M = glm::mat3_cast(head_position->second);
 		switch (gui_status)
 		{
-			case stream_tab::foveation_settings:
+			case stream_tab::foveation_settings: {
+				auto override = foveation_center.get_manual_mode();
+
 				imgui_ctx->layers()[0].orientation = head_position->second;
-				imgui_ctx->layers()[0].position = head_position->first + M * glm::vec3{0, override_foveation_distance * sin(override_foveation_pitch), -override_foveation_distance};
+				imgui_ctx->layers()[0].position = head_position->first + M * glm::vec3{0, override.distance * sin(override.pitch), -override.distance};
 				break;
+			}
 
 			case stream_tab::hidden:
 				// Always use the same position for the GUI shortcut tip
@@ -1096,15 +1095,15 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 
 		if (left_hand and right_hand)
 		{
-			auto left = left_hand->locate(world_space, predicted_display_time);
-			auto right = right_hand->locate(world_space, predicted_display_time);
+			auto left = left_hand->locate(world_space, predicted_display_time).joints;
+			auto right = right_hand->locate(world_space, predicted_display_time).joints;
 
-			if (left and left->is_input_source() and
-			    xr::hand_tracker::check_flags(left->joints, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
+			if (left and
+			    xr::hand_tracker::check_flags(*left, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
 				hide_left_controller = true;
 
-			if (right and right->is_input_source() and
-			    xr::hand_tracker::check_flags(right->joints, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
+			if (right and
+			    xr::hand_tracker::check_flags(*right, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
 				hide_right_controller = true;
 		}
 

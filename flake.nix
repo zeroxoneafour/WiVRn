@@ -30,6 +30,7 @@
             pkgs.kdePackages.kirigami-addons
           ];
           extraNativeBuildInputs = [
+            pkgs.ninja
             pkgs.util-linux
           ];
 
@@ -70,7 +71,7 @@
                     # Keep in sync with CMakeLists.txt monado rev
                     rev = lib.strings.trim (builtins.readFile ./monado-rev);
                     # Nix will output the correct hash when it doesn't match
-                    hash = "sha256-3+bdxyXHuaweT/K+Jwh428XNMuZUd1tL2bdFBRIZ/Po=";
+                    hash = "sha256-yGkuD2jAG/ACSGkH1Cz8o23wHLtEqtNCUe2kS5OyC68=";
                   };
                 };
 

@@ -905,6 +905,8 @@ void application::initialize_vulkan()
 	optional_device_extensions.emplace(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+	optional_device_extensions.emplace(VK_EXT_FRAGMENT_DENSITY_MAP_2_EXTENSION_NAME);
+	optional_device_extensions.emplace(VK_QCOM_FRAGMENT_DENSITY_MAP_OFFSET_EXTENSION_NAME);
 
 #if WIVRN_USE_V4L2
 	// V4L2 decoders expose their output through DMA-buf
@@ -1065,7 +1067,9 @@ void application::initialize_vulkan()
 	        vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT{},
 	        vk::PhysicalDevice8BitStorageFeaturesKHR{},
 	        vk::PhysicalDevice16BitStorageFeaturesKHR{},
-	        vk::PhysicalDeviceShaderFloat16Int8FeaturesKHR{}};
+	        vk::PhysicalDeviceShaderFloat16Int8FeaturesKHR{},
+	        vk::PhysicalDeviceFragmentDensityMapFeaturesEXT{},
+	        vk::PhysicalDeviceFragmentDensityMapOffsetFeaturesQCOM{}};
 
 	auto check_feature_flag = [&](auto feature_flag, const char * extension_name) -> bool {
 		using FeatureStruct = class_from_member_t<decltype(feature_flag)>;
@@ -1091,6 +1095,14 @@ void application::initialize_vulkan()
 	if (check_feature_flag(&vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT::subgroupSizeControl, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME))
 		device_create_info.get<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>().computeFullSubgroups =
 		        vk_physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>().get<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>().computeFullSubgroups;
+	const bool fragment_density_map_supported =
+	        check_feature_flag(&vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::fragmentDensityMap, VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);
+	const bool fragment_density_map2_supported =
+	        utils::contains(vk_device_extensions, VK_EXT_FRAGMENT_DENSITY_MAP_2_EXTENSION_NAME);
+	const bool fragment_density_map_offset_supported =
+	        check_feature_flag(&vk::PhysicalDeviceFragmentDensityMapOffsetFeaturesQCOM::fragmentDensityMapOffset, VK_QCOM_FRAGMENT_DENSITY_MAP_OFFSET_EXTENSION_NAME);
+	foveation_vulkan_supported = fragment_density_map_supported and fragment_density_map2_supported and fragment_density_map_offset_supported;
+	spdlog::info("    Vulkan eye-tracked foveation support: {}", foveation_vulkan_supported);
 
 	vk_device = xr_system_id.create_device(vk_physical_device, device_create_info.get());
 	*vk_queue.lock() = vk_device.getQueue(vk_queue_family_index, 0);
@@ -1399,6 +1411,9 @@ void application::initialize()
 	        XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME,
 	        XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,
 	        XR_FB_FACE_TRACKING2_EXTENSION_NAME,
+	        XR_FB_FOVEATION_EXTENSION_NAME,
+	        XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME,
+	        XR_FB_FOVEATION_VULKAN_EXTENSION_NAME,
 	        XR_FB_PASSTHROUGH_EXTENSION_NAME,
 	        XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME,
 
@@ -1409,8 +1424,10 @@ void application::initialize()
 
 	        XR_META_BODY_TRACKING_FIDELITY_EXTENSION_NAME,
 	        XR_META_BODY_TRACKING_FULL_BODY_EXTENSION_NAME,
+	        XR_META_FOVEATION_EYE_TRACKED_EXTENSION_NAME,
 	        XR_META_LOCAL_DIMMING_EXTENSION_NAME,
 	        XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME,
+	        XR_META_VULKAN_SWAPCHAIN_CREATE_INFO_EXTENSION_NAME,
 	};
 
 	for (const auto & i: interaction_profiles)
@@ -1459,6 +1476,13 @@ void application::initialize()
 		XrSystemEyeGazeInteractionPropertiesEXT eye_gaze_properties = xr_system_id.eye_gaze_interaction_properties();
 		spdlog::info("    Eye gaze support: {}", (bool)eye_gaze_properties.supportsEyeGazeInteraction);
 		eye_gaze_supported = eye_gaze_properties.supportsEyeGazeInteraction;
+	}
+
+	if (xr_instance.has_extension(XR_META_FOVEATION_EYE_TRACKED_EXTENSION_NAME))
+	{
+		XrSystemFoveationEyeTrackedPropertiesMETA foveation_properties = xr_system_id.foveation_eye_tracked_properties();
+		spdlog::info("    Eye tracked foveation center support: {}", (bool)foveation_properties.supportsFoveationEyeTracked);
+		foveation_center_supported = foveation_properties.supportsFoveationEyeTracked;
 	}
 
 	if (xr_instance.has_extension(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME))
@@ -1832,6 +1856,59 @@ void application::loop()
 			exit_requested = true;
 		}
 	}
+}
+
+std::optional<XrQuaternionf> application::locate_gaze(XrTime time)
+{
+	XrSpaceLocation res{
+	        .type = XR_TYPE_SPACE_LOCATION,
+	};
+	if (get_hmd_traits().view_locate)
+	{
+		xrLocateSpace(spaces[size_t(xr::spaces::eye_gaze)],
+		              spaces[size_t(xr::spaces::view)],
+		              time,
+		              &res);
+	}
+	else
+	{
+		XrSpaceLocation tmp{
+		        .type = XR_TYPE_SPACE_LOCATION,
+		};
+		auto xr_res = xrLocateSpace(spaces[size_t(xr::spaces::view)],
+		                            spaces[size_t(xr::spaces::world)],
+		                            time,
+		                            &tmp);
+		if (XR_FAILED(xr_res))
+			return std::nullopt;
+		xr_res = xrLocateSpace(spaces[size_t(xr::spaces::eye_gaze)],
+		                       spaces[size_t(xr::spaces::world)],
+		                       time,
+		                       &res);
+		if (XR_FAILED(xr_res))
+			return std::nullopt;
+
+		glm::quat target_quat(
+		        res.pose.orientation.w,
+		        res.pose.orientation.x,
+		        res.pose.orientation.y,
+		        res.pose.orientation.z);
+		const glm::quat view_quat(
+		        tmp.pose.orientation.w,
+		        tmp.pose.orientation.x,
+		        tmp.pose.orientation.y,
+		        tmp.pose.orientation.z);
+		target_quat = glm::conjugate(view_quat) * target_quat;
+		res.pose.orientation = {
+		        .x = target_quat.x,
+		        .y = target_quat.y,
+		        .z = target_quat.z,
+		        .w = target_quat.w};
+		res.locationFlags &= tmp.locationFlags;
+	}
+	if (res.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)
+		return res.pose.orientation;
+	return std::nullopt;
 }
 
 #ifdef __ANDROID__

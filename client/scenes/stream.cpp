@@ -36,10 +36,12 @@
 #include "decoder/shard_accumulator.h"
 #include "inplace_vector.hpp"
 #include "spdlog/spdlog.h"
+#include "utils/i18n.h"
 #include "utils/named_thread.h"
 #include "utils/ranges.h"
 #include "wivrn_packets.h"
 #include <algorithm>
+#include <cmath>
 #include <mutex>
 #include <ranges>
 #include <thread>
@@ -200,7 +202,8 @@ static const std::array supported_depth_formats{
 
 scenes::stream::stream(std::string server_name, scene & parent_scene) :
         scene_impl<stream>(supported_color_formats, supported_depth_formats, parent_scene),
-        apps{*this, std::move(server_name)}
+        apps{*this, std::move(server_name)},
+        foveation_center{instance, system, session, device, commandpool, queue, swapchain_format}
 {
 	auto views = system.view_configuration_views(viewconfig);
 	width = views[0].recommendedImageRectWidth;
@@ -388,20 +391,6 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		}
 	}
 
-	{
-		const auto & config = application::get_config();
-		self->override_foveation_enable = config.override_foveation_enable;
-		self->override_foveation_pitch = config.override_foveation_pitch;
-		self->override_foveation_distance = config.override_foveation_distance;
-
-		if (self->override_foveation_enable)
-			self->network_session->send_control(from_headset::override_foveation_center{
-			        .enabled = self->override_foveation_enable,
-			        .pitch = self->override_foveation_pitch,
-			        .distance = self->override_foveation_distance,
-			});
-	}
-
 	self->network_thread = utils::named_thread("network_thread", &stream::process_packets, self.get());
 
 	self->command_buffer = std::move(self->device.allocateCommandBuffers({
@@ -575,8 +564,10 @@ void scenes::stream::on_focused()
 		}
 	}
 
-	plots_toggle_1 = get_action("plots_toggle_1").first;
-	plots_toggle_2 = get_action("plots_toggle_2").first;
+	menu_chord.a = get_action("menu_toggle_1").first;
+	menu_chord.b = get_action("menu_toggle_2").first;
+	gamepad_chord.a = get_action("gamepad_mode_1").first;
+	gamepad_chord.b = get_action("gamepad_mode_2").first;
 	recenter_left = get_action("recenter_left").first;
 	recenter_right = get_action("recenter_right").first;
 	gui_distance_left = get_action("gui_distance_left").first;
@@ -893,9 +884,34 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
-	session.begin_frame();
+	// Search for frame with desired display time on all decoders
+	// If no such frame exists, use the latest frame for each decoder
+	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
+	std::array<XrPosef, view_count> pose;
+	std::array<XrFovf, view_count> fov{};
+	std::array<bool, view_count> valid_fov{};
+	std::array<wivrn::to_headset::foveation_parameter, view_count> foveation;
+	std::array<XrExtent2Di, view_count> extents;
+	int32_t max_width = 0;
+	int32_t max_height = 0;
+	for (size_t i = 0; i < view_count; ++i)
+	{
+		auto & blit_handle = current_blit_handles[i];
+		if (!blit_handle)
+			continue;
 
-	std::array<int, view_count> image_indices;
+		fov[i] = blit_handle->view_info.fov[i];
+		valid_fov[i] = true;
+		foveation[i] = blit_handle->view_info.foveation[i];
+		extents[i] = stream_defoveator::defoveated_size(foveation[i]);
+		max_width = std::max(max_width, extents[i].width);
+		max_height = std::max(max_height, extents[i].height);
+	}
+
+	if (max_width > 0 and max_height > 0)
+		ensure_swapchain(foveation_center.is_cropped(fov, valid_fov), max_width, max_height);
+
+	session.begin_frame();
 
 #if WIVRN_FEATURE_RENDERDOC
 	renderdoc_begin(*vk_instance);
@@ -910,13 +926,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	command_buffer.resetQueryPool(*query_pool, 0, size_gpu_timestamps);
 	command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *query_pool, 0);
 
-	// Search for frame with desired display time on all decoders
-	// If no such frame exists, use the latest frame for each decoder
-	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
-	std::array<XrPosef, view_count> pose;
-	std::array<XrFovf, view_count> fov;
-	std::array<wivrn::to_headset::foveation_parameter, view_count> foveation;
 	bool use_alpha = false;
+	auto now = instance.now();
 
 	std::array<stream_defoveator::input, view_count> images;
 	for (size_t i = 0; i < view_count + use_alpha; ++i)
@@ -929,7 +940,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			continue;
 		}
 
-		blit_handle->feedback.blitted = instance.now();
+		blit_handle->feedback.blitted = now;
 		if (blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder > 1'000'000'000)
 			set_state(state::stalled);
 		++blit_handle->feedback.times_displayed;
@@ -1028,42 +1039,18 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	    std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
 	    is_gui_interactable())
 	{
-		XrExtent2Di extents[view_count];
-		{
-			int32_t max_width = 0;
-			int32_t max_height = 0;
-			for (size_t i = 0; i < view_count; ++i)
-			{
-				extents[i] = stream_defoveator::defoveated_size(foveation[i]);
-				max_width = std::max(max_width, extents[i].width);
-				max_height = std::max(max_height, extents[i].height);
-			}
-			if (not swapchain)
-				setup_reprojection_swapchain(max_width, max_height);
-			else if (swapchain.width() < max_width or swapchain.height() < max_height)
-			{
-				// If the defoveated image is larger than the swapchain, try to reallocate one
-				try
-				{
-					spdlog::info("Recreating swapchain, from {}x{} to {}x{}",
-					             swapchain.width(),
-					             swapchain.height(),
-					             max_width,
-					             max_height);
-					setup_reprojection_swapchain(max_width, max_height);
-				}
-				catch (std::exception & e)
-				{
-					spdlog::warn("failed to increase swapchain size");
-					for (size_t i = 0; i < view_count; ++i)
-					{
-						extents[i].width = std::min(extents[i].width, swapchain.width());
-						extents[i].height = std::min(extents[i].height, swapchain.height());
-					}
-				}
-			}
-		}
 		assert(swapchain);
+
+		// Swapchains only recreated when switching between cropped/full
+		// Otherwise we clamp and resize the existing one
+		for (size_t i = 0; i < view_count; ++i)
+		{
+			extents[i].width = std::min(extents[i].width, swapchain.width());
+			extents[i].height = std::min(extents[i].height, swapchain.height());
+		}
+
+		foveation_center.update(fov, valid_fov, swapchain, frame_state.predictedDisplayTime);
+
 		// defoveate the image, apply scale/bias
 		int image_index = swapchain.acquire();
 		swapchain.wait();
@@ -1173,6 +1160,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 		render_start(use_alpha, frame_state.predictedDisplayTime);
 
+		// full-FOV dummy layer for Meta foveation, used when cropping FOV
+		if (auto layer = foveation_center.get_layer())
+			add_projection_layer(layer->flags, layer->space, layer->views);
+
 		// Add the layer with the streamed content
 		std::array<XrCompositionLayerProjectionView, view_count> layer_view;
 		for (uint32_t view = 0; view < view_count; view++)
@@ -1223,7 +1214,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	{
 		// Keep a copy of the feedback packets as they can be modified if they're encrypted
 		inplace_vector<from_headset::feedback, decoder_count> feedbacks;
-		inplace_vector<serialization_packet, decoder_count> packets;
+		// +1 for optional foveation packet
+		inplace_vector<serialization_packet, decoder_count + 1> packets;
 
 		feedbacks.reserve(current_blit_handles.size());
 		packets.reserve(current_blit_handles.size());
@@ -1235,6 +1227,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				auto & packet = packets.emplace_back();
 				wivrn_session::control_socket_t::serialize(packet, feedbacks.emplace_back(handle->feedback));
 			}
+		}
+		if (auto foveation_packet = foveation_center.take_packet())
+		{
+			auto & packet = packets.emplace_back();
+			wivrn_session::control_socket_t::serialize(packet, *foveation_packet);
 		}
 		if (not packets.empty())
 		{
@@ -1249,32 +1246,49 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	auto show_gamepad_toast = [this, now](bool enabled) {
+		{
+			auto toast = gui_toast.lock();
+			toast->emplace(enabled
+			                       ? _("Now emulating a gamepad. Double-click both grips to go back to using VR controllers.")
+			                       : _("No longer emulating a gamepad."),
+			               false);
+		}
+		gui_status_last_change = now;
+	};
+
+	if (not application::get_config().emulated_gamepad)
+	{
+		if (gamepad_mode.exchange(false))
+		{
+			scheduled_derived_pose = now;
+			show_gamepad_toast(false);
+			spdlog::info("Controller gamepad emulation disabled due to setting change");
+		}
+		gamepad_chord.reset();
+	}
+	else if (gamepad_chord.check(now))
+	{
+		const bool enabled = not gamepad_mode.load();
+		gamepad_mode = enabled;
+		if (not enabled)
+			scheduled_derived_pose = now;
+		show_gamepad_toast(enabled);
+		spdlog::info("Controller gamepad mode {}", enabled ? "enabled" : "disabled");
+	}
+
 	read_actions();
 
-	if (application::get_config().enable_stream_gui)
+	if (application::get_config().enable_stream_gui and menu_chord.check(now))
 	{
-		XrActionStateGetInfo get_info{
-		        .type = XR_TYPE_ACTION_STATE_GET_INFO,
-		        .action = plots_toggle_1,
-		};
-
-		XrActionStateBoolean state_1{XR_TYPE_ACTION_STATE_BOOLEAN};
-		CHECK_XR(xrGetActionStateBoolean(session, &get_info, &state_1));
-		get_info.action = plots_toggle_2;
-		XrActionStateBoolean state_2{XR_TYPE_ACTION_STATE_BOOLEAN};
-		CHECK_XR(xrGetActionStateBoolean(session, &get_info, &state_2));
-
-		if (state_1.currentState and state_2.currentState and (state_1.changedSinceLastSync or state_2.changedSinceLastSync))
-		{
-			// Arbitrary transitions can happen from network commands
-			// Ensure we can't have a set of 2 non interactable states
-			if (is_gui_interactable())
-				next_gui_status = stream_tab::hidden;
-			else if (is_interactable(stored_gui_status))
-				next_gui_status = stored_gui_status;
-			else
-				next_gui_status = stream_tab::applications;
-		}
+		// Arbitrary transitions can happen from network commands
+		// Ensure we can't have a set of 2 non interactable states
+		if (is_gui_interactable())
+			next_gui_status = stream_tab::hidden;
+		else if (is_interactable(stored_gui_status))
+			next_gui_status = stored_gui_status;
+		else
+			next_gui_status = stream_tab::applications;
 	}
 
 	query_pool_filled = true;
@@ -1307,7 +1321,7 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		defoveator->reset_pipelines();
 }
 
-void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint32_t swapchain_height)
+void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint32_t swapchain_height, bool foveation)
 {
 	assert(swapchain_width);
 	assert(swapchain_height);
@@ -1317,8 +1331,21 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 
 	auto views = system.view_configuration_views(viewconfig);
 
-	swapchain = xr::swapchain(instance, session, device, swapchain_format, swapchain_width, swapchain_height, 1, views.size());
-	spdlog::info("Created stream swapchain: {}x{}", swapchain.width(), swapchain.height());
+	swapchain = xr::swapchain(
+	        instance,
+	        session,
+	        device,
+	        swapchain_format,
+	        swapchain_width,
+	        swapchain_height,
+	        1,
+	        views.size(),
+	        foveation);
+	spdlog::info(
+	        "Created stream swapchain: {}x{}{}",
+	        swapchain.width(),
+	        swapchain.height(),
+	        foveation ? " with eye-tracked foveation" : "");
 	for (auto view: views)
 	{
 		if (swapchain.width() > view.maxImageRectWidth or swapchain.height() > view.maxImageRectHeight)
@@ -1334,6 +1361,26 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	        swapchain.images(),
 	        extent,
 	        swapchain.format());
+}
+
+void scenes::stream::ensure_swapchain(bool cropped, uint32_t width, uint32_t height)
+{
+	if (!swapchain or swapchain.width() < width or swapchain.height() < height or foveation_center.needs_swapchain_recreation(cropped))
+	{
+		try
+		{
+			setup_reprojection_swapchain(width, height, foveation_center.use_meta_swapchain(cropped));
+			foveation_center.on_swapchain_recreated(cropped);
+		}
+		catch (std::exception & e)
+		{
+			spdlog::warn("failed to create swapchain");
+		}
+	}
+	else
+	{
+		foveation_center.set_cropped(cropped);
+	}
 }
 
 scene::meta & scenes::stream::get_meta_scene()
@@ -1352,8 +1399,10 @@ scene::meta & scenes::stream::get_meta_scene()
 	                {"right_scroll", XR_ACTION_TYPE_VECTOR2F_INPUT},
 	                {"right_haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT},
 
-	                {"plots_toggle_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
-	                {"plots_toggle_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"menu_toggle_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"menu_toggle_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"gamepad_mode_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"gamepad_mode_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
 
 	                {"recenter_left", XR_ACTION_TYPE_BOOLEAN_INPUT},
 	                {"recenter_right", XR_ACTION_TYPE_BOOLEAN_INPUT},
@@ -1401,8 +1450,17 @@ scene::meta & scenes::stream::get_meta_scene()
 	                                {"foveation_ok", "/user/hand/right/input/a/click"},
 	                                {"foveation_cancel", "/user/hand/right/input/b/click"},
 
-	                                {"plots_toggle_1", "/user/hand/left/input/thumbstick/click"},
-	                                {"plots_toggle_2", "/user/hand/right/input/thumbstick/click"},
+	                                {"menu_toggle_1", "/user/hand/left/input/thumbstick/click"},
+	                                {"menu_toggle_2", "/user/hand/right/input/thumbstick/click"},
+	                        },
+	                },
+	                suggested_binding{
+	                        {
+	                                "/interaction_profiles/valve/frame_controller_valve",
+	                        },
+	                        {
+	                                {"gamepad_mode_1", "/user/hand/left/input/squeeze/click"},
+	                                {"gamepad_mode_2", "/user/hand/right/input/squeeze/click"},
 	                        },
 	                },
 	                suggested_binding{

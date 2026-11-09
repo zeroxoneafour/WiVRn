@@ -332,6 +332,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("forward_keyboard", &configuration::forward_keyboard),
 	        scalar("forward_mouse", &configuration::forward_mouse),
 	        scalar("forward_gamepad", &configuration::forward_gamepad),
+	        scalar("emulated_gamepad", &configuration::emulated_gamepad),
 	        scalar("virtual_keyboard_layout", &configuration::virtual_keyboard_layout),
 	        scalar("override_foveation_enable", &configuration::override_foveation_enable),
 	        scalar("override_foveation_pitch", &configuration::override_foveation_pitch),
@@ -391,6 +392,19 @@ void configuration::save()
 	// nested object
 	json << ",\"openxr_post_processing\":{\"super_sampling\":" << openxr_post_processing.super_sampling;
 	json << ",\"sharpening\":" << openxr_post_processing.sharpening << "}";
+
+	{
+		bool first = true;
+		json << ",\"body_parts\": {";
+		for (const auto & [b, name]: magic_enum::enum_entries<wivrn::from_headset::body_part_mask>())
+		{
+			if (not first)
+				json << ",";
+			first = false;
+			json << '"' << name << "\":" << std::boolalpha << bool(body_part_mask & std::to_underlying(b));
+		}
+		json << "}";
+	}
 
 	// feature flags, keyed by enum name
 	for (auto & [key, value]: features)

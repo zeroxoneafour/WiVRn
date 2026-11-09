@@ -294,7 +294,8 @@ public:
 			}
 		}
 #endif
-		U_LOG_W("No suitable hardware accelerated codec found");
+		if (config.name != encoder_x264)
+			U_LOG_W("No suitable hardware accelerated codec found");
 		if (config.name.empty() and not config.codec and std::ranges::contains(info.supported_codecs, video_codec::pyrowave, &video_codec_capability::codec) and video_encoder_pyrowave::supported(vk))
 			return {encoder_pyrowave, video_codec::pyrowave};
 #if WIVRN_USE_X264

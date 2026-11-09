@@ -408,11 +408,6 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);
 
-	if (session.get_info().eye_gaze)
-	{
-		auto now = os_monotonic_get_ns();
-		session.add_tracking_request(device_id::EYE_GAZE, frame.rendering.desired_present_time_ns, now, now);
-	}
 	view_info.foveation = foveation.foveate(
 	        vk.device,
 	        cmd,
@@ -499,7 +494,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		        info.frame_id);
 	}
 
-	auto j = encode_request.exchange(i);
+	[[maybe_unused]] auto j = encode_request.exchange(i);
 	encode_request.notify_all();
 	assert(j == -1);
 
@@ -602,6 +597,8 @@ xrt_result_t compositor::get_view_config(
 			}
 			return XRT_SUCCESS;
 		case XRT_VIEW_TYPE_QUAD:
+		case XRT_VIEW_TYPE_INVALID:
+		case XRT_VIEW_TYPE_MAX:
 			return XRT_ERROR_UNSUPPORTED_VIEW_TYPE;
 	}
 	return XRT_ERROR_UNSUPPORTED_VIEW_TYPE;
@@ -818,14 +815,9 @@ void compositor::set_framerate(float hz)
 		encoder->set_framerate(hz);
 }
 
-void compositor::update_tracking(const from_headset::tracking & tracking)
+void compositor::update_foveation(const from_headset::foveation & packet)
 {
-	foveation.update_tracking(tracking);
-}
-
-void compositor::update_foveation_center_override(const from_headset::override_foveation_center & center)
-{
-	foveation.update_foveation_center_override(center);
+	foveation.update_foveation(packet);
 }
 
 void compositor::resume()

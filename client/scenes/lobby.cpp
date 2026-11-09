@@ -958,6 +958,12 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	// assert(views.size() == swapchains_lobby.size());
 	assert(views.size() == 2); // FIXME
 
+	if (not(flags & XR_VIEW_STATE_POSITION_VALID_BIT and flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
+	{
+		spdlog::warn("Invalid view state, skip frame");
+		return;
+	}
+
 	bool hide_left_controller = false;
 	bool hide_right_controller = false;
 
@@ -974,29 +980,27 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	{
 		auto windows = imgui_ctx->windows();
 
-		auto left = left_hand->locate(world_space, frame_state.predictedDisplayTime);
+		auto left = left_hand->locate(world_space, frame_state.predictedDisplayTime).joints;
 		if (left)
 		{
-			if (left->is_input_source())
-				stick_finger_to_gui(left->joints, windows);
+			stick_finger_to_gui(*left, windows);
 			hide_left_controller = true;
 		}
 
-		auto right = right_hand->locate(world_space, frame_state.predictedDisplayTime);
+		auto right = right_hand->locate(world_space, frame_state.predictedDisplayTime).joints;
 		if (right)
 		{
-			if (right->is_input_source())
-				stick_finger_to_gui(right->joints, windows);
+			stick_finger_to_gui(*right, windows);
 			hide_right_controller = true;
 		}
 
-		hand_model::apply(world, left ? &left->joints : nullptr, right ? &right->joints : nullptr);
+		hand_model::apply(world, left ? &*left : nullptr, right ? &*right : nullptr);
 
-		if (not new_gui_position and head_position and left and left->is_input_source())
-			new_gui_position = check_recenter_gesture(xr::spaces::palm_left, left->joints, *head_position);
+		if (not new_gui_position and head_position and left)
+			new_gui_position = check_recenter_gesture(xr::spaces::palm_left, *left, *head_position);
 
-		if (not new_gui_position and head_position and right and right->is_input_source())
-			new_gui_position = check_recenter_gesture(xr::spaces::palm_right, right->joints, *head_position);
+		if (not new_gui_position and head_position and right)
+			new_gui_position = check_recenter_gesture(xr::spaces::palm_right, *right, *head_position);
 	}
 
 	if (head_position and new_gui_position)

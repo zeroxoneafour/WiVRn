@@ -172,6 +172,8 @@ if (WIVRN_BUILD_DASHBOARD)
         find_package(Qt6 REQUIRED COMPONENTS QmlPrivate)
     endif()
 
+    # Prevent KDE cmake module from overwriting defaults
+    set(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT FALSE)
     find_package(ECM 5.115 REQUIRED NO_MODULE)
     list(APPEND CMAKE_MODULE_PATH "${ECM_MODULE_PATH}")
 
@@ -348,7 +350,6 @@ foreach(TARGET_NAME wivrn wivrn-server wivrn-dashboard wivrn-common wivrn-dissec
             -Wno-missing-field-initializers
             -Wno-unused-parameter
             -Wno-comment
-            -Wno-unused-variable
             -Wno-sign-compare
             $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-volatile -Wno-array-bounds>
             $<$<COMPILE_LANG_AND_ID:CXX,Clang>:-Wno-deprecated-volatile -Wno-unneeded-internal-declaration -Wno-c99-extensions -Wno-unused-private-field>
