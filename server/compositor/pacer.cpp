@@ -35,6 +35,8 @@ namespace wivrn
 
 static const int64_t margin_ns = 3'000'000;
 static const int64_t slop_ns = 500'000;
+// Duration of the frame history used to estimate the present to decoded time
+static const int64_t history_ns = 10'000'000'000;
 
 pacer::pacer(uint64_t frame_duration) :
         frame_duration_ns(frame_duration),
@@ -51,12 +53,22 @@ pacer::pacer(uint64_t frame_duration) :
 	        while (not t.stop_requested())
 	        {
 		        samples.clear();
+		        // Must not be locked with compute_mutex held, on_feedback locks them in the opposite order
+		        int64_t history_frames;
+		        {
+			        std::lock_guard lock(mutex);
+			        history_frames = std::max<int64_t>(1, history_ns / frame_duration_ns);
+		        }
 		        {
 			        std::unique_lock lock(compute_mutex);
 			        compute_cv.wait(lock);
+			        int64_t newest = -1;
+			        for (const auto & time: frame_times_compute)
+				        newest = std::max(newest, time.frame_id);
 			        for (const auto & time: frame_times_compute)
 			        {
-				        if (time.decoded > time.present)
+				        // Only recent frames, so that a transient spike stops affecting the latency once it is over
+				        if (time.frame_id > newest - history_frames and time.decoded > time.present)
 					        samples.push_back(time.decoded - time.present);
 			        }
 		        }
@@ -149,7 +161,8 @@ void pacer::on_feedback(const wivrn::from_headset::feedback & feedback, const cl
 		if (feedback.frame_index % 100 == 0)
 		{
 			std::unique_lock lock(compute_mutex);
-			std::swap(frame_times, frame_times_compute);
+			// Copy, the next frames still need the older entries
+			frame_times_compute = frame_times;
 			compute_cv.notify_all();
 		}
 		// adjust phase

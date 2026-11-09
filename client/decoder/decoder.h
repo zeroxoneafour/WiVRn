@@ -53,6 +53,9 @@ public:
 		// transfers between Vulkan and external engine
 		uint32_t foreign_queue_family = vk::QueueFamilyIgnored;
 #endif
+		// Estimated time between handing the image to the scene and the end of its decoding,
+		// for decoders that hand it over before the GPU has finished
+		XrDuration ready_delay = 0;
 	};
 
 public:

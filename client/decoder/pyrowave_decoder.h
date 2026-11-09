@@ -31,7 +31,12 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <stop_token>
+#include <thread>
 #include <vector>
 
 namespace wivrn
@@ -128,27 +133,47 @@ class pyrowave_decoder : public decoder
 	vk::raii::SamplerYcbcrConversion ycbcr_conversion = nullptr;
 	vk::raii::Sampler sampler_ = nullptr;
 
+	// Used by the worker thread, which waits for each decode to complete
 	vk::raii::CommandPool command_pool;
-	struct decode_slot
-	{
-		vk::raii::CommandBuffer cmd = nullptr;
-		vk::raii::Fence fence = nullptr;
-	};
-	std::array<decode_slot, pyrowave_core::decoder::max_pending_decodes> decode_slots;
-	int current_decode_slot = 0;
+	vk::raii::CommandBuffer cmd = nullptr;
+	vk::raii::Fence fence = nullptr;
+	// Duration between the submission of the previous decode and its completion
+	std::chrono::nanoseconds last_decode_duration{0};
 
 	std::array<image, image_count> image_pool;
 
 	std::weak_ptr<scenes::stream> weak_scene;
 	shard_accumulator * accumulator;
 
+	// Written by the network thread
 	uint64_t current_frame = 0;
 	std::vector<uint8_t> bitstream;
+
+	// Latest complete frame, waiting for the worker thread.
+	// A newer frame replaces it if the worker is still busy with the previous one.
+	struct pending_frame
+	{
+		std::vector<uint8_t> bitstream;
+		from_headset::feedback feedback;
+		to_headset::video_stream_data_shard::view_info_t view_info;
+		bool ready = false;
+	};
+	std::mutex pending_mutex;
+	std::condition_variable_any pending_cv;
+	pending_frame pending;
+
+	// Last member, so that it is stopped before the others are destroyed
+	std::jthread worker;
 
 	static pyrowave_core::device_caps caps(vk::raii::PhysicalDevice & physical_device);
 	// Can be overridden with WIVRN_PYROWAVE_FRAGMENT=0/1
 	static bool use_fragment_path(const pyrowave_core::device_caps & caps);
 	image * get_free();
+
+	void worker_function(std::stop_token stop);
+	void decode_frame(const std::vector<uint8_t> & frame,
+	                  const from_headset::feedback & feedback,
+	                  const to_headset::video_stream_data_shard::view_info_t & view_info);
 
 public:
 	static bool supported();

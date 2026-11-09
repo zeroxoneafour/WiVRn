@@ -635,7 +635,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 		{
 			if (decoder != decoders[stream].decoder.get())
 				return;
-			handle->feedback.received_from_decoder = instance.now();
+			handle->feedback.received_from_decoder = instance.now() + handle->ready_delay;
 			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
 		}
 

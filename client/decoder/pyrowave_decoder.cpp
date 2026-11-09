@@ -1220,15 +1220,11 @@ pyrowave_decoder::pyrowave_decoder(
         weak_scene(scene),
         accumulator(accumulator)
 {
-	auto command_buffers = device.allocateCommandBuffers({
+	cmd = std::move(device.allocateCommandBuffers({
 	        .commandPool = *command_pool,
-	        .commandBufferCount = uint32_t(decode_slots.size()),
-	});
-	for (auto [slot, cmd]: std::views::zip(decode_slots, command_buffers))
-	{
-		slot.cmd = std::move(cmd);
-		slot.fence = vk::raii::Fence(device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
-	}
+	        .commandBufferCount = 1,
+	})[0]);
+	fence = vk::raii::Fence(device, vk::FenceCreateInfo{});
 
 	// The alpha stream only uses the luma plane
 	if (stream_index != 2)
@@ -1319,15 +1315,15 @@ pyrowave_decoder::pyrowave_decoder(
 		        }
 		                .get());
 	}
+
+	worker = std::jthread([this](std::stop_token stop) { worker_function(stop); });
 }
 
 pyrowave_decoder::~pyrowave_decoder()
 {
-	std::vector<vk::Fence> fences;
-	for (auto & slot: decode_slots)
-		fences.push_back(*slot.fence);
-	if (device.waitForFences(fences, true, UINT64_MAX) != vk::Result::eSuccess)
-		spdlog::warn("pyrowave: waitForFences failed");
+	// The worker waits for each decode it submits, nothing is in flight once it has stopped
+	worker.request_stop();
+	worker.join();
 }
 
 void pyrowave_decoder::push_data(std::span<std::span<const uint8_t>> data, uint64_t frame_index, bool partial)
@@ -1345,22 +1341,60 @@ void pyrowave_decoder::frame_completed(
         const from_headset::feedback & feedback,
         const to_headset::video_stream_data_shard::view_info_t & view_info)
 {
-	impl.clear();
-	bool ok = impl.push_packet(bitstream);
+	// Called on the network thread: hand the frame over to the worker without touching the GPU,
+	// so that packets keep being received when the GPU is busy.
+	{
+		std::lock_guard lock(pending_mutex);
+		if (pending.ready)
+			spdlog::debug("pyrowave: decoder is behind, discard frame {}", pending.feedback.frame_index);
+		std::swap(pending.bitstream, bitstream);
+		pending.feedback = feedback;
+		pending.view_info = view_info;
+		pending.ready = true;
+	}
+	pending_cv.notify_one();
 	bitstream.clear();
-	if (not ok or not impl.decode_is_ready(false))
+}
+
+void pyrowave_decoder::worker_function(std::stop_token stop)
+{
+	std::vector<uint8_t> frame;
+	from_headset::feedback feedback;
+	to_headset::video_stream_data_shard::view_info_t view_info;
+
+	while (true)
+	{
+		{
+			std::unique_lock lock(pending_mutex);
+			if (not pending_cv.wait(lock, stop, [&] { return pending.ready; }))
+				return;
+			std::swap(frame, pending.bitstream);
+			feedback = pending.feedback;
+			view_info = pending.view_info;
+			pending.ready = false;
+		}
+
+		try
+		{
+			decode_frame(frame, feedback, view_info);
+		}
+		catch (std::exception & e)
+		{
+			spdlog::warn("pyrowave: decode failed: {}", e.what());
+		}
+		frame.clear();
+	}
+}
+
+void pyrowave_decoder::decode_frame(
+        const std::vector<uint8_t> & frame,
+        const from_headset::feedback & feedback,
+        const to_headset::video_stream_data_shard::view_info_t & view_info)
+{
+	impl.clear();
+	if (not impl.push_packet(frame) or not impl.decode_is_ready(false))
 	{
 		spdlog::warn("pyrowave: invalid or incomplete frame, discard frame");
-		return;
-	}
-
-	// Only wait for the decode that used the same buffers, not the previous one.
-	// This runs on the network thread: when the GPU is behind, drop the frame instead of blocking,
-	// waiting would stop receiving packets and delay or lose the frames of all streams.
-	auto & [cmd, fence] = decode_slots[current_decode_slot];
-	if (fence.getStatus() != vk::Result::eSuccess)
-	{
-		spdlog::debug("pyrowave: GPU is behind, discard frame");
 		return;
 	}
 
@@ -1381,8 +1415,6 @@ void pyrowave_decoder::frame_completed(
 	        *item->semaphore,
 	        item->semaphore_val,
 	        item->free);
-
-	current_decode_slot = (current_decode_slot + 1) % decode_slots.size();
 
 	cmd.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
@@ -1405,6 +1437,7 @@ void pyrowave_decoder::frame_completed(
 	cmd.end();
 
 	device.resetFences(*fence);
+	const auto submit_time = std::chrono::steady_clock::now();
 	application::get_queue().lock()->submit(
 	        vk::StructureChain{
 	                vk::SubmitInfo{
@@ -1421,7 +1454,16 @@ void pyrowave_decoder::frame_completed(
 	                .get(),
 	        *fence);
 
+	// The image is handed over before the GPU is done, the renderer waits for the semaphore.
+	// Report when it is expected to be ready, from the previous decode: the server paces the frames
+	// from this time, and the GPU decode time can be large when rendering is heavy.
+	handle->ready_delay = last_decode_duration.count();
 	if (auto scene = weak_scene.lock())
 		scene->push_blit_handle(accumulator, std::move(handle));
+
+	if (device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
+		spdlog::warn("pyrowave: waitForFences failed");
+	last_decode_duration = std::chrono::steady_clock::now() - submit_time;
 }
+
 } // namespace wivrn
