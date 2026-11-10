@@ -243,8 +243,8 @@ endif()
 FetchContent_Declare(boost         EXCLUDE_FROM_ALL SYSTEM URL https://github.com/boostorg/boost/releases/download/boost-1.89.0/boost-1.89.0-cmake.tar.xz
                                    URL_HASH SHA256=67acec02d0d118b5de9eb441f5fb707b3a1cdd884be00ca24b9a73c995511f74)
 # Only the shaders are used, SOURCE_SUBDIR has no CMakeLists.txt so the project is not added
-FetchContent_Declare(pyrowave      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/Themaister/pyrowave/archive/186f0393b77f7755953b5ecde994bb1cec2e4155.tar.gz
-                                   URL_HASH SHA256=97c30baed03a13f505f645276c737a6e36cfa43fe272d5b1b52bc358dc4cf6c5
+FetchContent_Declare(pyrowave      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/Themaister/pyrowave/archive/7fe0e2667cd3076b8b2bf04bcb80bc8d691b800b.tar.gz
+                                   URL_HASH SHA256=a044ab13acac2928aae9eb0bbf333b950d37dd09dee71b350e967af29231928e
                                    SOURCE_SUBDIR shaders)
 
 # Client dependencies
