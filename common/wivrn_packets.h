@@ -61,13 +61,17 @@ enum class device_id : uint8_t
 	RIGHT_GRIP,                   // /user/hand/right/input/grip/pose
 	RIGHT_AIM,                    // /user/hand/right/input/aim/pose
 	RIGHT_PALM,                   // /user/hand/right/palm_ext/pose
-	LEFT_X_CLICK,                 // /user/hand/left/input/x/click
-	LEFT_X_TOUCH,                 // /user/hand/left/input/x/touch
-	LEFT_Y_CLICK,                 // /user/hand/left/input/y/click
-	LEFT_Y_TOUCH,                 // /user/hand/left/input/y/touch
-	VIEW_CLICK,                   // /user/hand/left/input/view/click
-	VIEW_TOUCH,                   // /user/hand/left/input/view/touch
-	LEFT_MENU_CLICK,              // /user/hand/left/input/{menu,system}/click
+	DPAD_UP_CLICK,                // /user/hand/left/input/dpad_up/click
+	DPAD_UP_TOUCH,                // /user/hand/left/input/dpad_up/touch
+	DPAD_LEFT_CLICK,              // /user/hand/left/input/dpad_left/click
+	DPAD_LEFT_TOUCH,              // /user/hand/left/input/dpad_left/touch
+	LEFT_X_CLICK,                 // /user/hand/left/input/x/click or /user/hand/left/input/dpad_down/click
+	LEFT_X_TOUCH,                 // /user/hand/left/input/x/touch or /user/hand/left/input/dpad_down/touch
+	LEFT_Y_CLICK,                 // /user/hand/left/input/y/click or /user/hand/left/input/dpad_right/click
+	LEFT_Y_TOUCH,                 // /user/hand/left/input/y/touch or /user/hand/left/input/dpad_right/touch
+	LEFT_MENU_CLICK,              // /user/hand/left/input/{menu,view}/click
+	LEFT_MENU_TOUCH,              // /user/hand/left/input/{menu,view}/touch
+	LEFT_SYSTEM_CLICK,            // /user/hand/left/input/system/click
 	LEFT_SYSTEM_TOUCH,            // /user/hand/left/input/system/touch
 	LEFT_BUMPER_CLICK,            // /user/hand/left/input/bumper/click
 	LEFT_BUMPER_TOUCH,            // /user/hand/left/input/bumper/touch
@@ -103,10 +107,6 @@ enum class device_id : uint8_t
 	LEFT_AIM_ACTIVATE_READY,      // /user/hand/left/input/aim_activate_ext/ready_ext
 	LEFT_GRASP_VALUE,             // /user/hand/left/input/grasp_ext/value
 	LEFT_GRASP_READY,             // /user/hand/left/input/grasp_ext/ready_ext
-	DPAD_UP_CLICK,                // /user/hand/left/input/dpad_up/click
-	DPAD_UP_TOUCH,                // /user/hand/left/input/dpad_up/touch
-	DPAD_LEFT_CLICK,              // /user/hand/left/input/dpad_left/click
-	DPAD_LEFT_TOUCH,              // /user/hand/left/input/dpad_left/touch
 	A_CLICK,                      // /user/hand/right/input/a/click
 	A_TOUCH,                      // /user/hand/right/input/a/touch
 	B_CLICK,                      // /user/hand/right/input/b/click
@@ -115,10 +115,10 @@ enum class device_id : uint8_t
 	RIGHT_X_TOUCH,                // /user/hand/right/input/x/touch
 	RIGHT_Y_CLICK,                // /user/hand/right/input/y/click
 	RIGHT_Y_TOUCH,                // /user/hand/right/input/y/touch
-	RIGHT_SYSTEM_CLICK,           // /user/hand/right/input/system/click
-	RIGHT_SYSTEM_TOUCH,           // /user/hand/right/input/system/touch
 	RIGHT_MENU_CLICK,             // /user/hand/right/input/menu/click
 	RIGHT_MENU_TOUCH,             // /user/hand/right/input/menu/touch
+	RIGHT_SYSTEM_CLICK,           // /user/hand/right/input/system/click
+	RIGHT_SYSTEM_TOUCH,           // /user/hand/right/input/system/touch
 	RIGHT_BUMPER_CLICK,           // /user/hand/right/input/bumper/click
 	RIGHT_BUMPER_TOUCH,           // /user/hand/right/input/bumper/touch
 	RIGHT_SQUEEZE_CLICK,          // /user/hand/right/input/squeeze/click
@@ -154,10 +154,14 @@ enum class device_id : uint8_t
 	RIGHT_GRASP_VALUE,            // /user/hand/right/input/grasp_ext/value
 	RIGHT_GRASP_READY,            // /user/hand/right/input/grasp_ext/ready_ext
 	EYE_GAZE,                     // /user/eyes_ext/input/gaze_ext/pose
-	LEFT_HAND,                    // identify hand tracking
-	RIGHT_HAND,                   // identify hand tracking
-	BODY,                         // identify body tracking
-	FACE,                         // identify face tracking
+
+	LEFT_CONTROLLER,               // identify controller
+	RIGHT_CONTROLLER,              // identify controller
+	LEFT_HAND = LEFT_CONTROLLER,   // identify hand tracking
+	RIGHT_HAND = RIGHT_CONTROLLER, // identify hand tracking
+	BODY,                          // identify body tracking
+	FACE,                          // identify face tracking
+	GAMEPAD,                       // identify gamepad
 
 	// Gamepad, microsoft/xbox_controller profile (/user/gamepad)
 	GAMEPAD_MENU_CLICK,             // /user/gamepad/input/menu/click
@@ -347,6 +351,7 @@ struct headset_info_packet
 	};
 	std::optional<audio_description> speaker;
 	std::optional<audio_description> microphone;
+	bool battery_status; // supports XR_EXT_interaction_profile_battery_state_display, for reporting controller/gamepad battery status
 	bool hand_tracking;
 	bool eye_gaze;
 	bool palm_pose;
@@ -669,8 +674,8 @@ struct feedback
 
 struct battery
 {
-	float charge;
-	bool present;
+	device_id device;
+	std::optional<float> charge;
 	bool charging;
 };
 

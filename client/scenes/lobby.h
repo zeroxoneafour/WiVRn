@@ -95,7 +95,6 @@ class lobby : public scene_impl<lobby>
 
 	uint32_t width;
 	uint32_t height;
-	XrViewConfigurationView stream_view;
 
 #if WIVRN_CLIENT_DEBUG_MENU
 	// GUI debug
@@ -271,6 +270,7 @@ public:
 	void on_unfocused() override;
 	void on_focused() override;
 	void on_xr_event(const xr::event &) override;
+	void on_battery_update(battery::device device, const battery::battery_status &) override;
 
 	static meta & get_meta_scene();
 };

@@ -57,20 +57,18 @@ enum wivrn_controller_input_index
 	WIVRN_CONTROLLER_MENU_TOUCH,        // /user/hand/XXXX/input/menu/touch
 	WIVRN_CONTROLLER_SYSTEM_CLICK,      // /user/hand/XXXX/input/system/click
 	WIVRN_CONTROLLER_SYSTEM_TOUCH,      // /user/hand/XXXX/input/system/touch
-	WIVRN_CONTROLLER_VIEW_CLICK,        // /user/hand/left/input/view/click
-	WIVRN_CONTROLLER_VIEW_TOUCH,        // /user/hand/left/input/view/touch
+	WIVRN_CONTROLLER_DPAD_UP_CLICK,     // /user/hand/left/input/dpad_up/click
+	WIVRN_CONTROLLER_DPAD_UP_TOUCH,     // /user/hand/left/input/dpad_up/touch
+	WIVRN_CONTROLLER_DPAD_LEFT_CLICK,   // /user/hand/left/input/dpad_left/click
+	WIVRN_CONTROLLER_DPAD_LEFT_TOUCH,   // /user/hand/left/input/dpad_left/touch
+	WIVRN_CONTROLLER_X_CLICK,           // /user/hand/XXXX/input/x/click or /user/hand/left/input/dpad_down/click
+	WIVRN_CONTROLLER_X_TOUCH,           // /user/hand/XXXX/input/x/touch or /user/hand/left/input/dpad_down/touch
+	WIVRN_CONTROLLER_Y_CLICK,           // /user/hand/XXXX/input/y/click or /user/hand/left/input/dpad_right/click
+	WIVRN_CONTROLLER_Y_TOUCH,           // /user/hand/XXXX/input/y/touch or /user/hand/left/input/dpad_right/touch
 	WIVRN_CONTROLLER_A_CLICK,           // /user/hand/right/input/a/click
 	WIVRN_CONTROLLER_A_TOUCH,           // /user/hand/right/input/a/touch
 	WIVRN_CONTROLLER_B_CLICK,           // /user/hand/right/input/b/click
 	WIVRN_CONTROLLER_B_TOUCH,           // /user/hand/right/input/b/touch
-	WIVRN_CONTROLLER_X_CLICK,           // /user/hand/XXXX/input/x/click
-	WIVRN_CONTROLLER_X_TOUCH,           // /user/hand/XXXX/input/x/touch
-	WIVRN_CONTROLLER_Y_CLICK,           // /user/hand/XXXX/input/y/click
-	WIVRN_CONTROLLER_Y_TOUCH,           // /user/hand/XXXX/input/y/touch
-	WIVRN_CONTROLLER_DPAD_UP_CLICK,     // /user/hand/XXXX/input/dpad_up/click
-	WIVRN_CONTROLLER_DPAD_UP_TOUCH,     // /user/hand/XXXX/input/dpad_up/touch
-	WIVRN_CONTROLLER_DPAD_LEFT_CLICK,   // /user/hand/XXXX/input/dpad_left/click
-	WIVRN_CONTROLLER_DPAD_LEFT_TOUCH,   // /user/hand/XXXX/input/dpad_left/touch
 	WIVRN_CONTROLLER_SQUEEZE_CLICK,     // /user/hand/XXXX/input/squeeze/click
 	WIVRN_CONTROLLER_SQUEEZE_FORCE,     // /user/hand/XXXX/input/squeeze/force
 	WIVRN_CONTROLLER_SQUEEZE_TOUCH,     // /user/hand/XXXX/input/squeeze/touch
@@ -150,6 +148,14 @@ input_data map_input(device_id id)
 			return {WIVRN_CONTROLLER_PALM_POSE, wivrn_input_type::POSE, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
 		case device_id::RIGHT_PALM:
 			return {WIVRN_CONTROLLER_PALM_POSE, wivrn_input_type::POSE, XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER};
+		case device_id::DPAD_UP_CLICK:
+			return {WIVRN_CONTROLLER_DPAD_UP_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
+		case device_id::DPAD_UP_TOUCH:
+			return {WIVRN_CONTROLLER_DPAD_UP_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
+		case device_id::DPAD_LEFT_CLICK:
+			return {WIVRN_CONTROLLER_DPAD_LEFT_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
+		case device_id::DPAD_LEFT_TOUCH:
+			return {WIVRN_CONTROLLER_DPAD_LEFT_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
 		case device_id::LEFT_X_CLICK:
 			return {WIVRN_CONTROLLER_X_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
 		case device_id::LEFT_X_TOUCH:
@@ -174,26 +180,18 @@ input_data map_input(device_id id)
 			return {WIVRN_CONTROLLER_B_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER};
 		case device_id::B_TOUCH:
 			return {WIVRN_CONTROLLER_B_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER};
-		case device_id::DPAD_UP_CLICK:
-			return {WIVRN_CONTROLLER_DPAD_UP_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
-		case device_id::DPAD_UP_TOUCH:
-			return {WIVRN_CONTROLLER_DPAD_UP_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
-		case device_id::DPAD_LEFT_CLICK:
-			return {WIVRN_CONTROLLER_DPAD_LEFT_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
-		case device_id::DPAD_LEFT_TOUCH:
-			return {WIVRN_CONTROLLER_DPAD_LEFT_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
 		case device_id::LEFT_MENU_CLICK:
 			return {WIVRN_CONTROLLER_MENU_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
+		case device_id::LEFT_MENU_TOUCH:
+			return {WIVRN_CONTROLLER_MENU_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
 		case device_id::RIGHT_MENU_CLICK:
 			return {WIVRN_CONTROLLER_MENU_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER};
 		case device_id::RIGHT_MENU_TOUCH:
 			return {WIVRN_CONTROLLER_MENU_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER};
+		case device_id::LEFT_SYSTEM_CLICK:
+			return {WIVRN_CONTROLLER_SYSTEM_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
 		case device_id::LEFT_SYSTEM_TOUCH:
 			return {WIVRN_CONTROLLER_SYSTEM_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
-		case device_id::VIEW_CLICK:
-			return {WIVRN_CONTROLLER_VIEW_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
-		case device_id::VIEW_TOUCH:
-			return {WIVRN_CONTROLLER_VIEW_TOUCH, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER};
 		case device_id::RIGHT_SYSTEM_CLICK:
 			return {WIVRN_CONTROLLER_SYSTEM_CLICK, wivrn_input_type::BOOL, XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER};
 		case device_id::RIGHT_SYSTEM_TOUCH:
@@ -406,15 +404,15 @@ xrt_binding_input_pair index_input_binding_right[] = {
 xrt_binding_input_pair frame_input_binding_left[] = {
         {XRT_INPUT_FRAME_DPAD_UP_CLICK, XRT_INPUT_FRAME_DPAD_UP_CLICK},
         {XRT_INPUT_FRAME_DPAD_UP_TOUCH, XRT_INPUT_FRAME_DPAD_UP_TOUCH},
-        {XRT_INPUT_FRAME_DPAD_DOWN_CLICK, XRT_INPUT_TOUCH_X_CLICK},
-        {XRT_INPUT_FRAME_DPAD_DOWN_TOUCH, XRT_INPUT_TOUCH_X_TOUCH},
         {XRT_INPUT_FRAME_DPAD_LEFT_CLICK, XRT_INPUT_FRAME_DPAD_LEFT_CLICK},
         {XRT_INPUT_FRAME_DPAD_LEFT_TOUCH, XRT_INPUT_FRAME_DPAD_LEFT_TOUCH},
+        {XRT_INPUT_FRAME_DPAD_DOWN_CLICK, XRT_INPUT_TOUCH_X_CLICK},
+        {XRT_INPUT_FRAME_DPAD_DOWN_TOUCH, XRT_INPUT_TOUCH_X_TOUCH},
         {XRT_INPUT_FRAME_DPAD_RIGHT_CLICK, XRT_INPUT_TOUCH_Y_CLICK},
         {XRT_INPUT_FRAME_DPAD_RIGHT_TOUCH, XRT_INPUT_TOUCH_Y_TOUCH},
-        {XRT_INPUT_FRAME_VIEW_CLICK, XRT_INPUT_FRAME_VIEW_CLICK},
+        {XRT_INPUT_FRAME_VIEW_CLICK, XRT_INPUT_TOUCH_MENU_CLICK},
         {XRT_INPUT_FRAME_VIEW_TOUCH, XRT_INPUT_FRAME_VIEW_TOUCH},
-        {XRT_INPUT_FRAME_SYSTEM_CLICK, XRT_INPUT_TOUCH_MENU_CLICK},
+        {XRT_INPUT_FRAME_SYSTEM_CLICK, XRT_INPUT_FRAME_SYSTEM_CLICK},
         {XRT_INPUT_FRAME_SYSTEM_TOUCH, XRT_INPUT_INDEX_SYSTEM_TOUCH},
         {XRT_INPUT_FRAME_BUMPER_CLICK, XRT_INPUT_FRAME_BUMPER_CLICK},
         {XRT_INPUT_FRAME_BUMPER_TOUCH, XRT_INPUT_FRAME_BUMPER_TOUCH},
@@ -429,6 +427,8 @@ xrt_binding_input_pair frame_input_binding_left[] = {
         {XRT_INPUT_FRAME_THUMBSTICK, XRT_INPUT_TOUCH_THUMBSTICK},
         {XRT_INPUT_FRAME_GRIP_POSE, XRT_INPUT_TOUCH_GRIP_POSE},
         {XRT_INPUT_FRAME_AIM_POSE, XRT_INPUT_TOUCH_AIM_POSE},
+        {XRT_INPUT_HAND_PINCH_POSE, XRT_INPUT_HAND_PINCH_POSE},
+        {XRT_INPUT_HAND_POKE_POSE, XRT_INPUT_HAND_POKE_POSE},
 };
 
 xrt_binding_input_pair frame_input_binding_right[] = {
@@ -457,6 +457,8 @@ xrt_binding_input_pair frame_input_binding_right[] = {
         {XRT_INPUT_FRAME_THUMBSTICK, XRT_INPUT_TOUCH_THUMBSTICK},
         {XRT_INPUT_FRAME_GRIP_POSE, XRT_INPUT_TOUCH_GRIP_POSE},
         {XRT_INPUT_FRAME_AIM_POSE, XRT_INPUT_TOUCH_AIM_POSE},
+        {XRT_INPUT_HAND_PINCH_POSE, XRT_INPUT_HAND_PINCH_POSE},
+        {XRT_INPUT_HAND_POKE_POSE, XRT_INPUT_HAND_POKE_POSE},
 };
 
 xrt_binding_output_pair frame_output_binding[] = {
@@ -726,11 +728,13 @@ wivrn_controller::wivrn_controller(xrt_device_name name,
                         .orientation_tracking = true,
                         .position_tracking = true,
                         .hand_tracking = name != XRT_DEVICE_EXT_HAND_INTERACTION and cnx->get_info().hand_tracking,
+                        .battery_status = cnx->get_info().battery_status,
                 },
                 .update_inputs = method_pointer<&wivrn_controller::update_inputs>,
                 .get_tracked_pose = method_pointer<&wivrn_controller::get_tracked_pose>,
                 .get_hand_tracking = method_pointer<&wivrn_controller::get_hand_tracking>,
                 .set_output = method_pointer<&wivrn_controller::set_output>,
+                .get_battery_status = method_pointer<&wivrn_controller::get_battery_status>,
                 .destroy = [](xrt_device *) {},
         },
         grip(hand_id == 0 ? device_id::LEFT_GRIP : device_id::RIGHT_GRIP),
@@ -779,19 +783,19 @@ wivrn_controller::wivrn_controller(xrt_device_name name,
 		{
 			inputs[WIVRN_CONTROLLER_HAND_TRACKING_LEFT].name = XRT_INPUT_HT_UNOBSTRUCTED_LEFT;
 			inputs[WIVRN_CONTROLLER_HAND_TRACKING_LEFT].active = true;
-			SET_INPUT(FRAME, VIEW_CLICK);
-			SET_INPUT(FRAME, VIEW_TOUCH);
-
 			SET_INPUT(TOUCH, MENU_CLICK);
-			SET_INPUT(TOUCH, X_CLICK);
-			SET_INPUT(TOUCH, Y_CLICK);
-			SET_INPUT(TOUCH, X_TOUCH);
-			SET_INPUT(TOUCH, Y_TOUCH);
+			inputs[WIVRN_CONTROLLER_MENU_TOUCH].name = XRT_INPUT_FRAME_VIEW_TOUCH;
+			inputs[WIVRN_CONTROLLER_MENU_TOUCH].active = true;
 
+			SET_INPUT(FRAME, SYSTEM_CLICK);
 			SET_INPUT(FRAME, DPAD_UP_CLICK);
 			SET_INPUT(FRAME, DPAD_UP_TOUCH);
 			SET_INPUT(FRAME, DPAD_LEFT_CLICK);
 			SET_INPUT(FRAME, DPAD_LEFT_TOUCH);
+			SET_INPUT(TOUCH, X_CLICK);
+			SET_INPUT(TOUCH, X_TOUCH);
+			SET_INPUT(TOUCH, Y_CLICK);
+			SET_INPUT(TOUCH, Y_TOUCH);
 		}
 		else
 		{
@@ -802,12 +806,12 @@ wivrn_controller::wivrn_controller(xrt_device_name name,
 
 			SET_INPUT(TOUCH, SYSTEM_CLICK);
 			SET_INPUT(TOUCH, A_CLICK);
-			SET_INPUT(TOUCH, B_CLICK);
 			SET_INPUT(TOUCH, A_TOUCH);
+			SET_INPUT(TOUCH, B_CLICK);
 			SET_INPUT(TOUCH, B_TOUCH);
 			SET_INPUT(FRAME, X_CLICK);
-			SET_INPUT(FRAME, Y_CLICK);
 			SET_INPUT(FRAME, X_TOUCH);
+			SET_INPUT(FRAME, Y_CLICK);
 			SET_INPUT(FRAME, Y_TOUCH);
 		}
 		SET_INPUT(VIVE_FOCUS3, SQUEEZE_CLICK);
@@ -990,6 +994,26 @@ xrt_result_t wivrn_controller::get_hand_tracking(xrt_input_name name, int64_t de
 	}
 }
 
+xrt_result_t wivrn_controller::get_battery_status(bool * out_present,
+                                                  bool * out_charging,
+                                                  float * out_charge)
+{
+	auto bat = battery.lock();
+
+	*out_charging = bat->charging;
+	if (bat->charge)
+	{
+		*out_present = true;
+		*out_charge = *bat->charge;
+	}
+	else
+	{
+		*out_present = false;
+	}
+
+	return XRT_SUCCESS;
+}
+
 void wivrn_controller::set_derived_pose(const from_headset::derived_pose & derived)
 {
 	auto list = [this](device_id id) -> pose_list * {
@@ -1006,6 +1030,14 @@ void wivrn_controller::set_derived_pose(const from_headset::derived_pose & deriv
 		target->set_derived(source, xrt_cast(derived.relation));
 }
 
+void wivrn_controller::update_battery(const from_headset::battery & new_battery)
+{
+	const device_id device = device_type == XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER ? device_id::LEFT_CONTROLLER : device_id::RIGHT_CONTROLLER;
+	if (new_battery.device == device)
+	{
+		*battery.lock() = new_battery;
+	}
+}
 void wivrn_controller::update_tracking(const from_headset::tracking & tracking, const clock_offset & offset)
 {
 	aim.update_tracking(tracking, offset);

@@ -59,20 +59,21 @@ using namespace beman::inplace_vector;
 static const std::unordered_map<std::string, device_id> device_ids = {
 	{"/user/hand/left/input/dpad_up/click",       device_id::DPAD_UP_CLICK},
 	{"/user/hand/left/input/dpad_up/touch",       device_id::DPAD_UP_TOUCH},
-	{"/user/hand/left/input/dpad_down/click",     device_id::LEFT_X_CLICK},
-	{"/user/hand/left/input/dpad_down/touch",     device_id::LEFT_X_TOUCH},
 	{"/user/hand/left/input/dpad_left/click",     device_id::DPAD_LEFT_CLICK},
 	{"/user/hand/left/input/dpad_left/touch",     device_id::DPAD_LEFT_TOUCH},
+	{"/user/hand/left/input/dpad_down/click",     device_id::LEFT_X_CLICK},
+	{"/user/hand/left/input/dpad_down/touch",     device_id::LEFT_X_TOUCH},
 	{"/user/hand/left/input/dpad_right/click",    device_id::LEFT_Y_CLICK},
 	{"/user/hand/left/input/dpad_right/touch",    device_id::LEFT_Y_TOUCH},
 	{"/user/hand/left/input/x/click",             device_id::LEFT_X_CLICK},
 	{"/user/hand/left/input/x/touch",             device_id::LEFT_X_TOUCH},
 	{"/user/hand/left/input/y/click",             device_id::LEFT_Y_CLICK},
 	{"/user/hand/left/input/y/touch",             device_id::LEFT_Y_TOUCH},
-	{"/user/hand/left/input/view/click",          device_id::VIEW_CLICK},
-	{"/user/hand/left/input/view/touch",          device_id::VIEW_TOUCH},
+	{"/user/hand/left/input/view/click",          device_id::LEFT_MENU_CLICK},
+	{"/user/hand/left/input/view/touch",          device_id::LEFT_MENU_TOUCH},
 	{"/user/hand/left/input/menu/click",          device_id::LEFT_MENU_CLICK},
-	{"/user/hand/left/input/system/click",        device_id::LEFT_MENU_CLICK},
+	{"/user/hand/left/input/menu/touch",          device_id::LEFT_MENU_TOUCH},
+	{"/user/hand/left/input/system/click",        device_id::LEFT_SYSTEM_CLICK},
 	{"/user/hand/left/input/system/touch",        device_id::LEFT_SYSTEM_TOUCH},
 	{"/user/hand/left/input/bumper/click",        device_id::LEFT_BUMPER_CLICK},
 	{"/user/hand/left/input/bumper/touch",        device_id::LEFT_BUMPER_TOUCH},
@@ -115,10 +116,10 @@ static const std::unordered_map<std::string, device_id> device_ids = {
 	{"/user/hand/right/input/x/touch",             device_id::RIGHT_X_TOUCH},
 	{"/user/hand/right/input/y/click",             device_id::RIGHT_Y_CLICK},
 	{"/user/hand/right/input/y/touch",             device_id::RIGHT_Y_TOUCH},
-	{"/user/hand/right/input/system/click",        device_id::RIGHT_SYSTEM_CLICK},
-	{"/user/hand/right/input/system/touch",        device_id::RIGHT_SYSTEM_TOUCH},
 	{"/user/hand/right/input/menu/click",          device_id::RIGHT_MENU_CLICK},
 	{"/user/hand/right/input/menu/touch",          device_id::RIGHT_MENU_TOUCH},
+	{"/user/hand/right/input/system/click",        device_id::RIGHT_SYSTEM_CLICK},
+	{"/user/hand/right/input/system/touch",        device_id::RIGHT_SYSTEM_TOUCH},
 	{"/user/hand/right/input/bumper/click",        device_id::RIGHT_BUMPER_CLICK},
 	{"/user/hand/right/input/bumper/touch",        device_id::RIGHT_BUMPER_TOUCH},
 	{"/user/hand/right/input/squeeze/click",       device_id::RIGHT_SQUEEZE_CLICK},
@@ -205,9 +206,9 @@ scenes::stream::stream(std::string server_name, scene & parent_scene) :
         apps{*this, std::move(server_name)},
         foveation_center{instance, system, session, device, commandpool, queue, swapchain_format}
 {
-	auto views = system.view_configuration_views(viewconfig);
-	width = views[0].recommendedImageRectWidth;
-	height = views[0].recommendedImageRectHeight;
+	const auto & view = system.stereo_view();
+	width = view.recommendedImageRectWidth;
+	height = view.recommendedImageRectHeight;
 }
 
 static from_headset::visibility_mask_changed::masks get_visibility_mask(xr::instance & inst, xr::session & session, int view)
@@ -253,7 +254,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		const auto & config = application::get_config();
 
 		{
-			auto view = self->system.view_configuration_views(self->viewconfig)[0];
+			auto view = self->system.stereo_view();
 			view = application::get_hmd_traits().override_view(view);
 
 			info.render_eye_width = view.recommendedImageRectWidth * config.resolution_scale;
@@ -285,6 +286,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.mirror_gamepad = config.forward_gamepad;
 		info.settings.enabled_body_parts = config.body_part_mask;
 
+		info.battery_status = self->instance.has_extension(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
 		info.hand_tracking = config.check_feature(feature::hand_tracking);
 		info.eye_gaze = config.check_feature(feature::eye_gaze);
 
@@ -1304,6 +1306,12 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	spdlog::info("setup, refresh rate {}", description.refresh_rate);
 	session.set_refresh_rate(description.refresh_rate);
 
+	battery & battery_monitor = application::get_battery_monitor();
+	for (auto device: magic_enum::enum_values<battery::device>())
+	{
+		on_battery_update(device, battery_monitor.get_battery_status(device));
+	}
+
 	std::unique_lock lock(decoder_mutex);
 	if (video_stream_description == description)
 		return;
@@ -1459,6 +1467,9 @@ scene::meta & scenes::stream::get_meta_scene()
 	                                "/interaction_profiles/valve/frame_controller_valve",
 	                        },
 	                        {
+	                                {"left_trigger", "/user/hand/left/input/bumper/click"},
+	                                {"right_trigger", "/user/hand/right/input/bumper/click"},
+
 	                                {"gamepad_mode_1", "/user/hand/left/input/squeeze/click"},
 	                                {"gamepad_mode_2", "/user/hand/right/input/squeeze/click"},
 	                        },
@@ -1530,6 +1541,31 @@ void scenes::stream::on_xr_event(const xr::event & event)
 		default:
 			break;
 	}
+}
+
+void scenes::stream::on_battery_update(battery::device device, const battery::battery_status & battery)
+{
+	device_id id = [&] {
+		switch (device)
+		{
+			case battery::device::head:
+				return device_id::HEAD;
+			case battery::device::left_controller:
+				return device_id::LEFT_CONTROLLER;
+			case battery::device::right_controller:
+				return device_id::RIGHT_CONTROLLER;
+			case battery::device::gamepad:
+				return device_id::GAMEPAD;
+			default:
+				assert(false);
+				__builtin_unreachable();
+		}
+	}();
+	network_session->send_control(from_headset::battery{
+	        .device = id,
+	        .charge = battery.charge,
+	        .charging = battery.charging,
+	});
 }
 
 bool scenes::stream::forward_hid_input(from_headset::hid::input_t packet, bool device_enabled)

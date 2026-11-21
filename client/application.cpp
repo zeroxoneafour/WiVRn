@@ -1393,6 +1393,7 @@ void application::initialize()
 	        XR_KHR_MAINTENANCE1_EXTENSION_NAME,
 	        XR_KHR_VISIBILITY_MASK_EXTENSION_NAME,
 
+	        XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME,
 	        XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME,
 	        XR_EXT_HAND_INTERACTION_EXTENSION_NAME,
 	        XR_EXT_HAND_TRACKING_EXTENSION_NAME,
@@ -1516,6 +1517,12 @@ void application::initialize()
 
 	spaces[size_t(xr::spaces::view)] = xr_session.create_reference_space(XR_REFERENCE_SPACE_TYPE_VIEW);
 	spaces[size_t(xr::spaces::world)] = xr_session.create_reference_space(XR_REFERENCE_SPACE_TYPE_STAGE);
+
+#ifdef __ANDROID__
+	battery_monitor.emplace(xr_instance, xr_session, app_info.native_app->activity->clazz);
+#else
+	battery_monitor.emplace(xr_instance, xr_session);
+#endif
 
 	config.emplace(xr_system_id, xr_session, application::get_config_path() / "client.json");
 	default_config.emplace(xr_system_id, xr_session);
@@ -1813,6 +1820,7 @@ application::~application()
 void application::loop()
 {
 	poll_events();
+	battery_monitor->poll_batteries();
 
 	auto scene = current_scene();
 	if (not is_session_running())
